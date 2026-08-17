@@ -2,7 +2,10 @@ from supabase import create_client
 import os
 
 KEY = os.environ.get("SUPABASE_KEY")
-URL = "https://jprzquxphumnmhtfjhrr.supabase.co"
+URL = os.environ.get("SUPABASE_URL")
+
+if not URL or not KEY:
+    raise RuntimeError("请先设置环境变量 SUPABASE_URL 和 SUPABASE_KEY")
 
 supabase = create_client(URL, KEY)
 
