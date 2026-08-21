@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query
 from postgrest.exceptions import APIError
 from supabase import Client
 
+from .auth import get_current_user
 from .database import supabase
 from .schemas import (
     AttackPatternCreate,
@@ -45,7 +46,11 @@ def handle_db_error(e: APIError):
     status_code=201,
     summary="新建攻击模式",
 )
-def create_pattern(body: AttackPatternCreate, db: Client = Depends(get_db)):
+def create_pattern(
+    body: AttackPatternCreate,
+    db: Client = Depends(get_db),
+    _user_id: str = Depends(get_current_user),
+):
     try:
         resp = db.table(PATTERNS_TABLE).insert(body.model_dump()).execute()
     except APIError as e:
@@ -88,7 +93,11 @@ def list_patterns(
     status_code=201,
     summary="新建测试任务",
 )
-def create_task(body: TestTaskCreate, db: Client = Depends(get_db)):
+def create_task(
+    body: TestTaskCreate,
+    db: Client = Depends(get_db),
+    _user_id: str = Depends(get_current_user),
+):
     # 显式校验外键，给出更友好的错误信息
     pattern = (
         db.table(PATTERNS_TABLE)
@@ -160,6 +169,7 @@ def update_task(
     body: TestTaskUpdate,
     task_id: UUID = Path(..., description="任务 ID"),
     db: Client = Depends(get_db),
+    _user_id: str = Depends(get_current_user),
 ):
     update_data = body.model_dump(exclude_unset=True)
     if not update_data:
