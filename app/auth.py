@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from fastapi import Header, HTTPException
 
@@ -11,8 +11,15 @@ except ImportError:  # 旧版 supabase-py 使用 gotrue
     from gotrue.errors import AuthApiError
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> str:
-    """FastAPI 依赖：验证 Supabase JWT，返回 user.id。
+class CurrentUser(NamedTuple):
+    """当前登录用户：user_id 用于数据归属，token 用于创建用户级 Supabase client（RLS）。"""
+
+    user_id: str
+    token: str
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> CurrentUser:
+    """FastAPI 依赖：验证 Supabase JWT，返回 CurrentUser。
 
     期望请求头：Authorization: Bearer <token>
     验证失败一律抛 401。
@@ -32,4 +39,4 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> str
     user = getattr(resp, "user", None)
     if user is None:
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
-    return str(user.id)
+    return CurrentUser(user_id=str(user.id), token=token)

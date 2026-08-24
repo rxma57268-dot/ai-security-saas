@@ -2,12 +2,14 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Query
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 from supabase import Client
 
-from .auth import get_current_user
-from .database import supabase
+from .auth import CurrentUser, get_current_user
+from .database import get_user_client
 from .schemas import (
     AttackPatternCreate,
     AttackPatternOut,
@@ -27,8 +29,22 @@ PATTERNS_TABLE = "attack_patterns"
 TASKS_TABLE = "test_tasks"
 
 
-def get_db() -> Client:
-    return supabase
+@app.exception_handler(httpx.TransportError)
+async def upstream_error_handler(request: Request, exc: httpx.TransportError):
+    """Supabase 网络错误（重试后仍失败）兜底：返回 503 而不是裸 500"""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "数据库连接暂时不可用，请稍后重试"},
+    )
+
+
+def get_db(user: CurrentUser = Depends(get_current_user)) -> Client:
+    """每个请求创建带用户 token 的 Supabase client。
+
+    RLS 策略据此按用户隔离数据；同时使所有挂载了 db 依赖的接口
+    自动要求登录（get_current_user 校验失败即 401）。
+    """
+    return get_user_client(user.token)
 
 
 def handle_db_error(e: APIError):
@@ -49,10 +65,12 @@ def handle_db_error(e: APIError):
 def create_pattern(
     body: AttackPatternCreate,
     db: Client = Depends(get_db),
-    _user_id: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ):
+    data = body.model_dump()
+    data["user_id"] = user.user_id
     try:
-        resp = db.table(PATTERNS_TABLE).insert(body.model_dump()).execute()
+        resp = db.table(PATTERNS_TABLE).insert(data).execute()
     except APIError as e:
         handle_db_error(e)
     return resp.data[0]
@@ -96,7 +114,7 @@ def list_patterns(
 def create_task(
     body: TestTaskCreate,
     db: Client = Depends(get_db),
-    _user_id: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ):
     # 显式校验外键，给出更友好的错误信息
     pattern = (
@@ -108,8 +126,10 @@ def create_task(
     if not pattern.data:
         raise HTTPException(status_code=400, detail="关联的 attack_pattern_id 不存在")
 
+    data = body.model_dump(mode="json")
+    data["user_id"] = user.user_id
     try:
-        resp = db.table(TASKS_TABLE).insert(body.model_dump(mode="json")).execute()
+        resp = db.table(TASKS_TABLE).insert(data).execute()
     except APIError as e:
         handle_db_error(e)
     return resp.data[0]
@@ -169,7 +189,6 @@ def update_task(
     body: TestTaskUpdate,
     task_id: UUID = Path(..., description="任务 ID"),
     db: Client = Depends(get_db),
-    _user_id: str = Depends(get_current_user),
 ):
     update_data = body.model_dump(exclude_unset=True)
     if not update_data:
