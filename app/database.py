@@ -56,3 +56,18 @@ _options = SyncClientOptions(
 )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, options=_options)
+
+
+def get_user_client(token: str) -> Client:
+    """创建带用户 JWT 的 Supabase client，使 RLS 策略生效。
+
+    通过 postgrest.auth(token) 把用户 token 设置到 PostgREST 请求头，
+    数据库侧会以 authenticated 角色 + auth.uid() 执行 RLS 策略。
+    每个请求应创建独立 client，不要复用全局 supabase（避免串号）。
+
+    注意：.publishable/anon key 本身不绕过 RLS，真正的行级隔离由 RLS 策略 +
+    用户 token 共同完成；service_role key 会绕过 RLS，严禁用于此用途。
+    """
+    client = create_client(SUPABASE_URL, SUPABASE_KEY, options=_options)
+    client.postgrest.auth(token)
+    return client
