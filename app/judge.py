@@ -26,7 +26,7 @@ AttackPatternRecord = dict[str, Any]
 _VALID_VERDICTS: tuple[str, ...] = ("attack_success", "defense_success", "uncertain")
 
 # prompt 模板是可迭代的资产，单独存文件
-_PROMPT_TEMPLATE = (Path(__file__).parent / "judge_prompt.md").read_text(
+_PROMPT_TEMPLATE = (Path(__file__).parent / "llm_judge_prompt.md").read_text(
     encoding="utf-8"
 )
 
@@ -133,9 +133,11 @@ class LLMJudge(Judge):
         prompt = (
             _PROMPT_TEMPLATE
             .replace("{attack_category}", str(pattern.get("attack_category") or "未知"))
+            .replace("{attack_sub_type}", str(pattern.get("attack_sub_type") or "未知"))
             .replace("{pattern_name}", str(pattern.get("name") or "未知"))
             .replace("{payload}", payload)
             .replace("{response}", response)
+            .replace("{expected_behavior}", str(pattern.get("expected_behavior") or "未提供"))
         )
         raw = await self.client.chat([{"role": "user", "content": prompt}])
         return self.parse_verdict(raw)

@@ -71,12 +71,14 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
         response = await target.chat([{"role": "user", "content": payload}])
 
         # 6. 判定：regex / llm / both
-        regex_verdict = await RegexJudge().judge(payload, response, pattern)
+        # 把任务的 expected_behavior 合入判定上下文（LLM 裁判模板需要）
+        judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
+        regex_verdict = await RegexJudge().judge(payload, response, judge_context)
 
         llm_verdict: Verdict | None = None
         if JUDGE_MODE in ("llm", "both"):
             try:
-                llm_verdict = await LLMJudge().judge(payload, response, pattern)
+                llm_verdict = await LLMJudge().judge(payload, response, judge_context)
             except Exception as e:
                 # 裁判模型失败不阻塞任务，回落到规则裁判，但留下日志
                 logger.warning("LLMJudge 调用失败，回落 regex: %s: %s", type(e).__name__, e)
