@@ -22,10 +22,16 @@ class TargetModel:
       TARGET_MODEL     模型名，如 deepseek-chat / glm-4-flash
     """
 
-    def __init__(self) -> None:
-        self.base_url: str | None = os.environ.get("TARGET_BASE_URL")
-        self.api_key: str | None = os.environ.get("TARGET_API_KEY")
-        self.model: str | None = os.environ.get("TARGET_MODEL")
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        # 参数优先，缺省回落到环境变量
+        self.base_url: str | None = base_url or os.environ.get("TARGET_BASE_URL")
+        self.api_key: str | None = api_key or os.environ.get("TARGET_API_KEY")
+        self.model: str | None = model or os.environ.get("TARGET_MODEL")
 
         if not self.base_url or not self.api_key or not self.model:
             raise RuntimeError(

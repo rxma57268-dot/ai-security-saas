@@ -150,5 +150,7 @@ class TestTaskOut(BaseModel):
     expected_behavior: Optional[str] = None
     evidence: Optional[str] = None
     regression_tested: Optional[bool] = None
+    verdict_source: Optional[str] = None
+    needs_review: Optional[bool] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

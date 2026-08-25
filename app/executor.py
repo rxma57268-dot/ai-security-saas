@@ -1,19 +1,29 @@
-"""任务执行引擎：渲染 payload → 调用靶模型 → RegexJudge 判定 → 结果写库。
+"""任务执行引擎：渲染 payload → 调用靶模型 → 判定 → 结果写库。
 
 状态机：待执行 → 执行中 → 完成 / 失败
+判定模式（JUDGE_MODE 环境变量）：
+  regex  只用规则裁判
+  llm    只用 LLM 裁判（裁判失败回落到规则裁判）
+  both   两个裁判都跑（默认）：LLM 结果为准，两判不一致时 needs_review=true
 """
 
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
 from supabase import Client
 
-from .judge import RegexJudge
+from .judge import LLMJudge, RegexJudge, Verdict
 from .target import TargetModel
 
 PATTERNS_TABLE = "attack_patterns"
 TASKS_TABLE = "test_tasks"
+
+JUDGE_MODE = os.environ.get("JUDGE_MODE", "both")
+
+logger = logging.getLogger(__name__)
 
 
 def render_payload(template: str, task: dict[str, Any]) -> str:
@@ -60,14 +70,39 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
         target = TargetModel()
         response = await target.chat([{"role": "user", "content": payload}])
 
-        # 6. 规则判定
-        verdict = RegexJudge().judge(payload, response, pattern)
+        # 6. 判定：regex / llm / both
+        # 把任务的 expected_behavior 合入判定上下文（LLM 裁判模板需要）
+        judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
+        regex_verdict = await RegexJudge().judge(payload, response, judge_context)
 
-        # 7. 写回结果：响应文本、是否成功、模式自带危险等级、状态 → 完成
+        llm_verdict: Verdict | None = None
+        if JUDGE_MODE in ("llm", "both"):
+            try:
+                llm_verdict = await LLMJudge().judge(payload, response, judge_context)
+            except Exception as e:
+                # 裁判模型失败不阻塞任务，回落到规则裁判，但留下日志
+                logger.warning("LLMJudge 调用失败，回落 regex: %s: %s", type(e).__name__, e)
+                llm_verdict = None
+
+        if JUDGE_MODE == "regex":
+            verdict, verdict_source, needs_review = regex_verdict, "regex", False
+        else:
+            # llm / both：LLM 结果为准；both 模式下两判不一致 → 需人工复核
+            verdict = llm_verdict or regex_verdict
+            verdict_source = "llm" if llm_verdict else "regex"
+            needs_review = (
+                JUDGE_MODE == "both"
+                and llm_verdict is not None
+                and llm_verdict != regex_verdict
+            )
+
+        # 7. 写回结果：响应文本、是否成功、模式自带危险等级、判定来源、状态 → 完成
         update: dict[str, Any] = {
             "status": "完成",
             "actual_behavior": response,
             "is_success": verdict == "attack_success",
+            "verdict_source": verdict_source,
+            "needs_review": needs_review,
         }
         if pattern.get("default_severity"):
             update["severity"] = pattern["default_severity"]
@@ -77,6 +112,8 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
             "task_id": task_id,
             "status": "完成",
             "verdict": verdict,
+            "verdict_source": verdict_source,
+            "needs_review": needs_review,
             "is_success": update["is_success"],
             "severity": update.get("severity"),
         }
