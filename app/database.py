@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 
@@ -21,25 +22,59 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 REQUEST_TIMEOUT = 30.0  # 单次请求超时（秒）
 MAX_RETRIES = 2  # 失败后自动重试次数（即最多尝试 3 次）
 RETRY_BASE_DELAY = 1.0  # 指数退避基数（秒）：第 1 次重试等 1s，第 2 次等 2s
+RETRYABLE_STATUS_CODES = {429}  # 速率限制：值得重试的 HTTP 状态码
 
 
 class RetryTransport(httpx.HTTPTransport):
-    """带重试的 httpx 传输层：网络层错误（连接失败/超时/连接重置等）自动重试。
+    """带重试的 httpx 同步传输层。
 
-    仅重试 httpx.TransportError（网络不可达类错误），不重试 HTTP 4xx/5xx
-    响应——那些是服务端明确给出的结果，重试没有意义。
+    重试两类失败（指数退避）：
+    - httpx.TransportError：连接失败/超时/连接重置等网络层错误
+    - HTTP 429：速率限制
+    其他 4xx/5xx 响应是服务端明确结果，直接返回不重试。
     """
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        last_exc: httpx.TransportError | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                return super().handle_request(request)
-            except httpx.TransportError as exc:
-                last_exc = exc
+                response = super().handle_request(request)
+            except httpx.TransportError:
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BASE_DELAY * (2**attempt))
-        raise last_exc  # type: ignore[misc]
+                    continue
+                raise
+            if (
+                response.status_code in RETRYABLE_STATUS_CODES
+                and attempt < MAX_RETRIES
+            ):
+                response.read()  # 读完响应体以释放连接
+                time.sleep(RETRY_BASE_DELAY * (2**attempt))
+                continue
+            return response
+        raise RuntimeError("unreachable")
+
+
+class AsyncRetryTransport(httpx.AsyncHTTPTransport):
+    """RetryTransport 的异步版本，供 httpx.AsyncClient 使用（如靶模型调用）。"""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = await super().handle_async_request(request)
+            except httpx.TransportError:
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_BASE_DELAY * (2**attempt))
+                    continue
+                raise
+            if (
+                response.status_code in RETRYABLE_STATUS_CODES
+                and attempt < MAX_RETRIES
+            ):
+                await response.aread()
+                await asyncio.sleep(RETRY_BASE_DELAY * (2**attempt))
+                continue
+            return response
+        raise RuntimeError("unreachable")
 
 
 # 注入统一的 httpx 客户端：postgrest / auth / storage / functions 全部走它
