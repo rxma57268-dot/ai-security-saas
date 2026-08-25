@@ -33,7 +33,7 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
     """执行一个测试任务，返回判定结果。
 
     Raises:
-        HTTPException: 任务不存在(404) / 关联攻击模式不存在(400)。
+        HTTPException: 任务不存在(404) / 关联攻击模式不存在(404)。
     """
     # 1. 查任务（RLS 保证只能查到自己的；查不到即 404）
     resp = db.table(TASKS_TABLE).select("*").eq("id", task_id).execute()
@@ -41,15 +41,11 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="任务不存在")
     task = resp.data[0]
 
-    # 2. 查攻击模式（payload 模板 + success/refusal 判定规则）
-    resp = (
-        db.table(PATTERNS_TABLE)
-        .select("*")
-        .eq("id", str(task["attack_pattern_id"]))
-        .execute()
-    )
+    # 2. 按任务关联的 attack_pattern_id 查攻击模式（payload 模板 + 判定规则）
+    pattern_id = str(task["attack_pattern_id"])
+    resp = db.table(PATTERNS_TABLE).select("*").eq("id", pattern_id).execute()
     if not resp.data:
-        raise HTTPException(status_code=400, detail="关联的攻击模式不存在")
+        raise HTTPException(status_code=404, detail="关联的攻击模式不存在")
     pattern = resp.data[0]
 
     # 3. 渲染 payload：任务里已填写的 payload 优先，否则用模式模板
