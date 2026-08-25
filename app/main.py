@@ -10,6 +10,7 @@ from supabase import Client
 
 from .auth import CurrentUser, get_current_user
 from .database import get_user_client
+from .executor import execute_task
 from .schemas import (
     AttackPatternCreate,
     AttackPatternOut,
@@ -178,6 +179,17 @@ def get_task(
     if not resp.data:
         raise HTTPException(status_code=404, detail="任务不存在")
     return resp.data[0]
+
+
+@app.post(
+    "/tasks/{task_id}/execute",
+    summary="执行任务（调靶模型 + 判定 + 写回结果）",
+)
+async def execute(
+    task_id: UUID = Path(..., description="任务 ID"),
+    db: Client = Depends(get_db),
+):
+    return await execute_task(str(task_id), db)
 
 
 @app.patch(
