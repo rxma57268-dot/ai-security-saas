@@ -69,6 +69,8 @@ class AttackPatternCreate(BaseModel):
     default_severity: Severity = Field(default="medium", description="默认严重等级")
     cwe_id: Optional[str] = Field(default=None, max_length=20, description="关联 CWE 编号，如 CWE-77")
     mitigation: Optional[str] = Field(default=None, description="修复建议")
+    success_patterns: list[str] = Field(default_factory=list, description="命中规则：响应含任一即疑似攻击成功")
+    refusal_patterns: list[str] = Field(default_factory=list, description="拒绝规则：响应含任一即判定防御成功（优先于命中规则）")
 
 
 class AttackPatternOut(BaseModel):
@@ -86,6 +88,8 @@ class AttackPatternOut(BaseModel):
     default_severity: Optional[Severity] = None
     cwe_id: Optional[str] = None
     mitigation: Optional[str] = None
+    success_patterns: Optional[list[str]] = None
+    refusal_patterns: Optional[list[str]] = None
     created_at: Optional[datetime] = None
 
 
