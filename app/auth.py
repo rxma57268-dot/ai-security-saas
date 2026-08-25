@@ -1,5 +1,6 @@
 from typing import NamedTuple, Optional
 
+import httpx
 from fastapi import Header, HTTPException
 
 from .database import supabase
@@ -32,9 +33,13 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> Cur
     try:
         resp = supabase.auth.get_user(token)
     except AuthApiError:
+        # token 无效/过期：认证失败
         raise HTTPException(status_code=401, detail="Token 无效或已过期")
+    except httpx.TransportError:
+        # Supabase 网络故障：不是用户的锅，返回 503
+        raise HTTPException(status_code=503, detail="认证服务暂时不可用，请稍后重试")
     except Exception:
-        raise HTTPException(status_code=401, detail="Token 验证失败")
+        raise HTTPException(status_code=503, detail="认证服务异常，请稍后重试")
 
     user = getattr(resp, "user", None)
     if user is None:
