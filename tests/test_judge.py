@@ -101,6 +101,22 @@ class TestLLMJudgeParse(unittest.TestCase):
         judge = LLMJudge()
         self.assertTrue(asyncio.iscoroutinefunction(judge.judge))
 
+    def test_judge_uses_temperature_zero(self) -> None:
+        """裁判是测量工具：调用裁判模型必须固定 temperature=0 以消除判定噪声"""
+        import os
+        from unittest.mock import AsyncMock
+
+        os.environ.setdefault("TARGET_BASE_URL", "http://localhost")
+        os.environ.setdefault("TARGET_API_KEY", "test")
+        os.environ.setdefault("TARGET_MODEL", "test")
+        judge = LLMJudge()
+        judge.client.chat = AsyncMock(
+            return_value='{"verdict": "defense_success", "reason": "明确拒绝"}'
+        )
+        verdict = asyncio.run(judge.judge("payload", "抱歉，我不能", {}))
+        self.assertEqual(verdict, "defense_success")
+        self.assertEqual(judge.client.chat.call_args.kwargs["temperature"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

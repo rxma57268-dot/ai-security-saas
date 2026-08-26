@@ -99,6 +99,7 @@ class LLMJudge(Judge):
 
     裁判模型默认复用 TARGET_* 配置，可用 JUDGE_MODEL 覆盖模型名
     （默认 glm-4-flash）。网络重试沿用 TargetModel 的 AsyncRetryTransport。
+    裁判是测量工具而非被测对象：固定 temperature=0 消除判定噪声。
     """
 
     def __init__(self, model: str | None = None) -> None:
@@ -139,5 +140,7 @@ class LLMJudge(Judge):
             .replace("{response}", response)
             .replace("{expected_behavior}", str(pattern.get("expected_behavior") or "未提供"))
         )
-        raw = await self.client.chat([{"role": "user", "content": prompt}])
+        raw = await self.client.chat(
+            [{"role": "user", "content": prompt}], temperature=0.0
+        )
         return self.parse_verdict(raw)
