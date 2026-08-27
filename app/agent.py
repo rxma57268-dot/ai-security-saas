@@ -26,7 +26,12 @@ from typing import Any, Literal
 import httpx
 from supabase import Client
 
-from .executor import JUDGE_MODE, _is_platform_content_filter, _update_task
+from .executor import (
+    JUDGE_MODE,
+    _fail_result,
+    _is_platform_content_filter,
+    _update_task,
+)
 from .judge import Verdict, judge_pair
 from .target import TargetModel
 
@@ -217,7 +222,20 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="任务不存在")
     task = resp.data[0]
 
-    # 2. 初始化：完整会话（发靶模型）、轮次记录、状态摘要
+    # 2. 状态机流转：→ 执行中（与 executor 单轮语义一致）
+    _update_task(db, task_id, {"status": "执行中"})
+
+    try:
+        return await _probe_loop(task_id, task, db)
+    except Exception as e:
+        # 任何未处理异常 → 任务记失败（与单轮 execute 的失败语义一致），
+        # 错误信息写入 actual_behavior 便于排查
+        return _fail_result(task_id, db, e)
+
+
+async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[str, Any]:
+    """ReAct 主循环 + 落库。异常由 run_probe 统一兜底为任务失败。"""
+    # 初始化：完整会话（发靶模型）、轮次记录、状态摘要
     conversation: list[dict[str, str]] = []  # 发靶模型的完整历史，不裁剪
     turns: list[dict[str, Any]] = []  # 含判定结果，供 Agent 思考上下文
     verdicts: list[Verdict] = []
@@ -227,10 +245,10 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
     last_verdict_source: str | None = None
     last_needs_review = False
 
-    # 2.5 候选模式检索：一次拉取（探测期间模式库不变，无需每轮查）
+    # 候选模式检索：一次拉取（探测期间模式库不变，无需每轮查）
     candidate_patterns = fetch_candidate_patterns(db)
 
-    # 3. ReAct 循环
+    # ReAct 循环
     for round_no in range(1, MAX_ROUNDS + 1):
         # Thought + Action：Agent 决策
         action = await agent_decide(
@@ -248,7 +266,7 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
             response = await target.chat(conversation)
         except httpx.HTTPStatusError as e:
             if not _is_platform_content_filter(e):
-                raise  # 非 1301 的 HTTP 错误不吞，交给上层（任务记失败）
+                raise  # 非 1301 的 HTTP 错误不吞，由 run_probe 兜底记失败
             # 1301 平台内容过滤：攻击通道被平台掐断，继续追问无意义。
             # 记一条 platform_filter 轮次，终止探测，任务记 defense_success
             # （防御方是厂商过滤层，与 executor 单轮语义一致）
@@ -312,7 +330,7 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
             logger.info("探测终止: %s（第 %d 轮）", reason, round_no)
             break
 
-    # 4. 落库：批量写轮次 + 写回任务
+    # 落库：批量写轮次 + 写回任务
     if turns:
         db.table(TURNS_TABLE).insert(turns).execute()
 

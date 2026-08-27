@@ -154,3 +154,19 @@ class TestTaskOut(BaseModel):
     needs_review: Optional[bool] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+# ---------- 多轮探测 ----------
+
+class ProbeTurnOut(BaseModel):
+    id: UUID
+    task_id: UUID
+    round_no: int
+    agent_thought: Optional[str] = None
+    action: Optional[str] = None
+    pattern_id: Optional[UUID] = None
+    payload: str
+    response: Optional[str] = None
+    verdict: Optional[str] = None
+    verdict_source: Optional[str] = None
+    created_at: Optional[datetime] = None
