@@ -3,10 +3,15 @@ from typing import List, Optional
 from uuid import UUID
 
 import httpx
+import logging
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 from supabase import Client
+
+# uvicorn 只配置自己的 logger，应用 logger（app.agent 等）的 INFO 默认被
+# root 的 WARNING 级别吞掉；显式提到 INFO，探测过程日志才会出现在 Render Logs
+logging.basicConfig(level=logging.INFO)
 
 from .auth import CurrentUser, get_current_user
 from .database import get_user_client
