@@ -12,7 +12,6 @@ LLMJudge 固定 temperature=0（测量工具需要可复现）；靶模型保持
   verdict_source=platform_filter，状态记为"完成"而非"失败"。
 """
 
-import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -21,15 +20,13 @@ import httpx
 from fastapi import HTTPException
 from supabase import Client
 
-from .judge import LLMJudge, RegexJudge, Verdict
+from .judge import judge_pair
 from .target import TargetModel
 
 PATTERNS_TABLE = "attack_patterns"
 TASKS_TABLE = "test_tasks"
 
 JUDGE_MODE = os.environ.get("JUDGE_MODE", "both")
-
-logger = logging.getLogger(__name__)
 
 
 def render_payload(template: str, task: dict[str, Any]) -> str:
@@ -103,30 +100,12 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
         target = TargetModel()
         response = await target.chat([{"role": "user", "content": payload}])
 
-        # 6. 判定：regex / llm / both
+        # 6. 判定：regex / llm / both（公共判定管线，agent.py 同款）
         # 把任务的 expected_behavior 合入判定上下文（LLM 裁判模板需要）
         judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
-        regex_verdict = await RegexJudge().judge(payload, response, judge_context)
-
-        llm_verdict: Verdict | None = None
-        if JUDGE_MODE in ("llm", "both"):
-            try:
-                llm_verdict = await LLMJudge().judge(payload, response, judge_context)
-            except Exception as e:
-                # 裁判模型失败不阻塞任务，回落到规则裁判，但留下日志
-                logger.warning("LLMJudge 调用失败，回落 regex: %s: %s", type(e).__name__, e)
-                llm_verdict = None
-
-        if JUDGE_MODE == "regex":
-            verdict, verdict_source, needs_review = regex_verdict, "regex", False
-        else:
-            # llm / both：LLM 结果为准；both 模式下两判不一致 → 需人工复核
-            # 裁判失败回落 regex 时结果可信度不足（替补裁判出的判），同样标记复核
-            verdict = llm_verdict or regex_verdict
-            verdict_source = "llm" if llm_verdict else "regex"
-            needs_review = llm_verdict is None or (
-                JUDGE_MODE == "both" and llm_verdict != regex_verdict
-            )
+        verdict, verdict_source, needs_review = await judge_pair(
+            payload, response, judge_context, JUDGE_MODE
+        )
 
         # 7. 写回结果：响应文本、是否成功、模式自带危险等级、判定来源、状态 → 完成
         update: dict[str, Any] = {
