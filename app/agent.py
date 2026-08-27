@@ -140,14 +140,19 @@ def _format_patterns(patterns: list[dict[str, Any]]) -> str:
 
 
 def fetch_candidate_patterns(db: Client) -> list[dict[str, Any]]:
-    """候选模式检索（MVP）：全量拉取模式库（当前 11 条），只取决策所需字段。
+    """候选模式检索（MVP）：全量拉取模式库（当前 11 条）。
 
+    一次拉取零成本，字段带全：裁判需要 success_patterns/refusal_patterns，
+    任务写回需要 default_severity。
     RLS 保证只能读到当前用户的模式。
     TODO(Phase 2): 按 success_count/use_count 历史成功率排序取 top K。
     """
     resp = (
         db.table(PATTERNS_TABLE)
-        .select("id,name,attack_category")
+        .select(
+            "id,name,attack_category,attack_sub_type,"
+            "success_patterns,refusal_patterns,default_severity"
+        )
         .execute()
     )
     return resp.data or []
@@ -268,10 +273,12 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
         conversation.append({"role": "assistant", "content": response})
 
         # Observation：双裁判判定本轮（与 executor 共用 judge_pair）
-        # TODO: 按 action["pattern_id"] 查 attack_patterns 取 pattern——裁判需要
-        # 其中的 success_patterns/refusal_patterns，task 里没有。模式检索实现前
-        # 先用空 dict（regex 裁判会判 uncertain，不影响循环结构验证）。
-        pattern: dict[str, Any] = {}
+        # 按 Agent 选定的 pattern_id 取模式（含 success/refusal_patterns）；
+        # 自由追问（pattern_id=null）或 id 未命中时用空 dict
+        pattern: dict[str, Any] = next(
+            (p for p in candidate_patterns if p.get("id") == action["pattern_id"]),
+            {},
+        )
         judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
         verdict, verdict_source, needs_review = await judge_pair(
             action["payload"], response, judge_context, JUDGE_MODE

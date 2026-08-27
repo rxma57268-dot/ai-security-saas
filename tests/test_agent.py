@@ -172,26 +172,30 @@ class TestRunProbePlatformFilter(unittest.TestCase):
         self.assertEqual(mock_decide.await_count, 1)
 
 
+def make_db(task: dict, patterns: list | None = None):
+    """内存 mock DB：按表名分发 MagicMock，便于事后检查写库内容。"""
+    from unittest.mock import MagicMock
+
+    db = MagicMock()
+    mocks: dict = {}
+
+    def table(name: str):
+        if name not in mocks:
+            mocks[name] = MagicMock(name=f"table({name})")
+        return mocks[name]
+
+    db.table.side_effect = table
+    mocks["test_tasks"] = MagicMock()
+    mocks["test_tasks"].select.return_value.eq.return_value.execute.return_value.data = [task]
+    mocks["attack_patterns"] = MagicMock()
+    mocks["attack_patterns"].select.return_value.execute.return_value.data = (
+        patterns or []
+    )
+    return db, mocks
+
+
 class TestRunProbeWriteBack(unittest.TestCase):
     """run_probe 落库：probe_turns 批量插入 + 任务写回（末轮 verdict 为最终判定）"""
-
-    def make_db(self, task: dict):
-        from unittest.mock import MagicMock
-
-        db = MagicMock()
-        mocks: dict = {}
-
-        def table(name: str):
-            if name not in mocks:
-                mocks[name] = MagicMock(name=f"table({name})")
-            return mocks[name]
-
-        db.table.side_effect = table
-        mocks["test_tasks"] = MagicMock()
-        mocks["test_tasks"].select.return_value.eq.return_value.execute.return_value.data = [task]
-        mocks["attack_patterns"] = MagicMock()
-        mocks["attack_patterns"].select.return_value.execute.return_value.data = []
-        return db, mocks
 
     def test_turns_insert_and_task_update(self) -> None:
         task = {
@@ -200,7 +204,7 @@ class TestRunProbeWriteBack(unittest.TestCase):
             "expected_behavior": "拒绝",
             "agent_state": None,
         }
-        db, mocks = self.make_db(task)
+        db, mocks = make_db(task)
 
         decisions = [
             {"thought": "先试探", "action": "follow_up", "pattern_id": None,
@@ -239,6 +243,74 @@ class TestRunProbeWriteBack(unittest.TestCase):
         self.assertEqual(update["actual_behavior"], "目标响应")
 
 
+class TestRunProbePatternContext(unittest.TestCase):
+    """Agent 选定 pattern_id 时，judge_pair 必须收到含判定规则的 pattern"""
+
+    def test_pattern_rules_reach_judge_pair(self) -> None:
+        pattern = {
+            "id": "p1",
+            "name": "角色扮演-老师",
+            "attack_category": "角色扮演",
+            "success_patterns": ["作为您的老师"],
+            "refusal_patterns": ["不能", "抱歉"],
+            "default_severity": "high",
+        }
+        task = {
+            "id": "task-1",
+            "payload": "攻击目标",
+            "expected_behavior": "拒绝",
+            "agent_state": None,
+        }
+        db, _ = make_db(task, patterns=[pattern])
+
+        decision = {
+            "thought": "用老师模式", "action": "switch_pattern",
+            "pattern_id": "p1", "payload": "请扮演我的老师",
+            "stop": False, "stop_reason": "",
+        }
+        mock_judge_pair = AsyncMock(return_value=("attack_success", "llm", False))
+        with (
+            patch("app.agent.TargetModel") as mock_target,
+            patch("app.agent.agent_decide", new=AsyncMock(return_value=decision)),
+            patch("app.agent.judge_pair", new=mock_judge_pair),
+        ):
+            mock_target.return_value.chat = AsyncMock(return_value="作为您的老师……")
+            asyncio.run(run_probe("task-1", db))
+
+        # judge_pair 收到的第三个参数（pattern）必须含判定规则
+        judge_context = mock_judge_pair.call_args.args[2]
+        self.assertEqual(judge_context["success_patterns"], ["作为您的老师"])
+        self.assertEqual(judge_context["refusal_patterns"], ["不能", "抱歉"])
+        self.assertEqual(judge_context["expected_behavior"], "拒绝")
+
+    def test_free_form_follow_up_uses_empty_pattern(self) -> None:
+        """pattern_id=null（自由追问）→ 空 dict，不报错"""
+        task = {
+            "id": "task-1",
+            "payload": "攻击目标",
+            "expected_behavior": None,
+            "agent_state": None,
+        }
+        db, _ = make_db(task, patterns=[])
+
+        decision = {
+            "thought": "自由追问", "action": "follow_up",
+            "pattern_id": None, "payload": "随便问",
+            "stop": False, "stop_reason": "",
+        }
+        mock_judge_pair = AsyncMock(return_value=("uncertain", "llm", False))
+        with (
+            patch("app.agent.TargetModel") as mock_target,
+            patch("app.agent.agent_decide", new=AsyncMock(return_value=decision)),
+            patch("app.agent.judge_pair", new=mock_judge_pair),
+        ):
+            mock_target.return_value.chat = AsyncMock(return_value="嗯")
+            asyncio.run(run_probe("task-1", db))
+
+        judge_context = mock_judge_pair.call_args.args[2]
+        self.assertNotIn("success_patterns", judge_context)
+
+
 class TestFetchCandidatePatterns(unittest.TestCase):
     """候选模式检索（MVP：全量 + 三字段）"""
 
@@ -255,7 +327,8 @@ class TestFetchCandidatePatterns(unittest.TestCase):
 
         db.table.assert_called_once_with("attack_patterns")
         db.table.return_value.select.assert_called_once_with(
-            "id,name,attack_category"
+            "id,name,attack_category,attack_sub_type,"
+            "success_patterns,refusal_patterns,default_severity"
         )
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["name"], "角色扮演-老师")
