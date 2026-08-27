@@ -23,13 +23,16 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from supabase import Client
 
-from .judge import LLMJudge, RegexJudge, Verdict
+from .executor import JUDGE_MODE, _is_platform_content_filter, _update_task
+from .judge import Verdict, judge_pair
 from .target import TargetModel
 
 TASKS_TABLE = "test_tasks"
 TURNS_TABLE = "probe_turns"
+PATTERNS_TABLE = "attack_patterns"
 
 AgentActionType = Literal["follow_up", "switch_pattern", "verify_hijack", "stop"]
 _VALID_ACTIONS: tuple[str, ...] = (
@@ -115,21 +118,70 @@ def parse_agent_output(text: str) -> dict[str, Any]:
     }
 
 
+def _format_turns(turns: list[dict[str, Any]]) -> str:
+    """最近轮次渲染为 Agent 可读的文本（含裁判结果，供策略推理）。"""
+    if not turns:
+        return "（暂无，这是第一轮）"
+    lines = []
+    for t in turns:
+        lines.append(
+            f"第{t['round_no']}轮 | 动作:{t['action']} | payload: {t['payload']}\n"
+            f"  目标响应: {t.get('response') or ''}\n"
+            f"  裁判: {t.get('verdict')}（来源 {t.get('verdict_source')}）"
+        )
+    return "\n".join(lines)
+
+
+def _format_patterns(patterns: list[dict[str, Any]]) -> str:
+    """候选模式序列化进 prompt（MVP：id+name+attack_category 三字段 JSON）。"""
+    if not patterns:
+        return "（模式库无候选，自由发挥）"
+    return json.dumps(patterns, ensure_ascii=False, indent=2)
+
+
+def fetch_candidate_patterns(db: Client) -> list[dict[str, Any]]:
+    """候选模式检索（MVP）：全量拉取模式库（当前 11 条），只取决策所需字段。
+
+    RLS 保证只能读到当前用户的模式。
+    TODO(Phase 2): 按 success_count/use_count 历史成功率排序取 top K。
+    """
+    resp = (
+        db.table(PATTERNS_TABLE)
+        .select("id,name,attack_category")
+        .execute()
+    )
+    return resp.data or []
+
+
 async def agent_decide(
     task: dict[str, Any],
     agent_state: dict[str, Any],
     recent_turns: list[dict[str, Any]],
     candidate_patterns: list[dict[str, Any]],
+    round_no: int,
 ) -> dict[str, Any]:
-    """调 Agent 模型做一轮决策。TODO: 实现。
+    """调 Agent 模型做一轮决策（ReAct 的 Thought + Action）。
 
-    prompt = _PROMPT_TEMPLATE 渲染 {goal} {agent_state} {round_no} {max_rounds}
-             {recent_turns} {patterns}
-    client = TargetModel(model=os.environ.get("AGENT_MODEL") or JUDGE_MODEL 缺省)
-    raw = await client.chat([...], temperature=0.0)
-    return parse_agent_output(raw)
+    模型配置：AGENT_MODEL env，缺省回落 JUDGE_MODEL，再缺省回落 TARGET_MODEL；
+    temperature=0——决策和裁判一样是测量行为，需要可复现。
+    TODO: goal 目前用任务 payload 充当攻击目标描述，任务模型后续可加独立 goal 字段。
     """
-    raise NotImplementedError
+    prompt = (
+        _PROMPT_TEMPLATE
+        .replace("{goal}", str(task.get("payload") or ""))
+        .replace(
+            "{agent_state}",
+            json.dumps(agent_state, ensure_ascii=False) if agent_state else "（无，第一轮）",
+        )
+        .replace("{round_no}", str(round_no))
+        .replace("{max_rounds}", str(MAX_ROUNDS))
+        .replace("{recent_turns}", _format_turns(recent_turns))
+        .replace("{patterns}", _format_patterns(candidate_patterns))
+    )
+    model = os.environ.get("AGENT_MODEL") or os.environ.get("JUDGE_MODEL")
+    client = TargetModel(model=model)  # model=None 时 TargetModel 回落 TARGET_MODEL
+    raw = await client.chat([{"role": "user", "content": prompt}], temperature=0.0)
+    return parse_agent_output(raw)
 
 
 # ---------- 上下文压缩（设计文档第 3 节） ----------
@@ -167,14 +219,18 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
     agent_state: dict[str, Any] = task.get("agent_state") or {}
 
     target = TargetModel()
-    regex_judge = RegexJudge()
-    llm_judge = LLMJudge()
+    last_verdict_source: str | None = None
+    last_needs_review = False
+
+    # 2.5 候选模式检索：一次拉取（探测期间模式库不变，无需每轮查）
+    candidate_patterns = fetch_candidate_patterns(db)
 
     # 3. ReAct 循环
     for round_no in range(1, MAX_ROUNDS + 1):
         # Thought + Action：Agent 决策
-        candidate_patterns: list[dict[str, Any]] = []  # TODO: 按成功率检索模式库
-        action = await agent_decide(task, agent_state, turns, candidate_patterns)
+        action = await agent_decide(
+            task, agent_state, turns, candidate_patterns, round_no
+        )
         if action["stop"]:
             logger.info("Agent 主动终止: %s", action["stop_reason"])
             break
@@ -183,23 +239,46 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
         # 边界钉死：只有 payload 外发给目标模型；thought/action/stop_reason
         # 是内部状态，只进 probe_turns 表，永不进入 conversation。
         conversation.append({"role": "user", "content": action["payload"]})
-        # TODO: target.chat 抛 1301（httpx.HTTPStatusError 平台过滤）时的处理：
-        # 记一条 verdict_source=platform_filter 的轮次进 probe_turns 后 stop——
-        # 攻击通道被平台掐断，继续追问无意义，但不能让它炸掉整个 run_probe。
-        response = await target.chat(conversation)
+        try:
+            response = await target.chat(conversation)
+        except httpx.HTTPStatusError as e:
+            if not _is_platform_content_filter(e):
+                raise  # 非 1301 的 HTTP 错误不吞，交给上层（任务记失败）
+            # 1301 平台内容过滤：攻击通道被平台掐断，继续追问无意义。
+            # 记一条 platform_filter 轮次，终止探测，任务记 defense_success
+            # （防御方是厂商过滤层，与 executor 单轮语义一致）
+            turns.append(
+                {
+                    "task_id": task_id,
+                    "round_no": round_no,
+                    "agent_thought": action["thought"],
+                    "action": action["action"],
+                    "pattern_id": action["pattern_id"],
+                    "payload": action["payload"],
+                    "response": f"被平台内容过滤拦截（1301）：{e.response.text[:200]}",
+                    "verdict": "defense_success",
+                    "verdict_source": "platform_filter",
+                }
+            )
+            verdicts.append("defense_success")
+            last_verdict_source = "platform_filter"
+            last_needs_review = False
+            logger.info("第 %d 轮被平台内容过滤拦截（1301），探测终止", round_no)
+            break
         conversation.append({"role": "assistant", "content": response})
 
-        # Observation：双裁判判定本轮（TODO: 复用 executor 的 both 模式逻辑，
-        # 抽到公共函数，避免与 executor.py 重复维护）
-        # TODO: judge_context = {**task} 是错的——裁判需要 pattern 的
-        # success_patterns/refusal_patterns，task 里没有。正确写法（executor.py
-        # 同款）：judge_context = {**pattern, "expected_behavior": task.get(...)}，
-        # 抽公共函数时一并修正。
-        judge_context = {**task}
-        regex_verdict = await regex_judge.judge(action["payload"], response, judge_context)
-        # TODO: llm_verdict + verdict_source + needs_review 逻辑同 executor
-        verdict: Verdict = regex_verdict
+        # Observation：双裁判判定本轮（与 executor 共用 judge_pair）
+        # TODO: 按 action["pattern_id"] 查 attack_patterns 取 pattern——裁判需要
+        # 其中的 success_patterns/refusal_patterns，task 里没有。模式检索实现前
+        # 先用空 dict（regex 裁判会判 uncertain，不影响循环结构验证）。
+        pattern: dict[str, Any] = {}
+        judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
+        verdict, verdict_source, needs_review = await judge_pair(
+            action["payload"], response, judge_context, JUDGE_MODE
+        )
         verdicts.append(verdict)
+        last_verdict_source = verdict_source
+        last_needs_review = needs_review
 
         turns.append(
             {
@@ -211,7 +290,7 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
                 "payload": action["payload"],
                 "response": response,
                 "verdict": verdict,
-                "verdict_source": "regex",  # TODO: 双裁判后确定
+                "verdict_source": verdict_source,
             }
         )
 
@@ -226,15 +305,35 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
             logger.info("探测终止: %s（第 %d 轮）", reason, round_no)
             break
 
-    # 4. 落库 + 会话级裁判 + 写回任务（TODO）
-    # db.table(TURNS_TABLE).insert(turns).execute()
-    # final_verdict = await session_judge(conversation)  # 注意 prompt 注入防御定界符
-    # db.table(TASKS_TABLE).update({...}).eq("id", task_id).execute()
-    # TODO: 更新 attack_patterns 的 use_count / success_count
+    # 4. 落库：批量写轮次 + 写回任务
+    if turns:
+        db.table(TURNS_TABLE).insert(turns).execute()
+
+    # 任务级最终判定：MVP 用最后一轮的 turn 级 verdict
+    # TODO(Phase 2): 会话级裁判（完整历史 + 注入防御定界符，见设计文档第 2 节）
+    final_verdict = verdicts[-1] if verdicts else "uncertain"
+    update: dict[str, Any] = {
+        "status": "完成",
+        "actual_behavior": (
+            turns[-1]["response"] if turns else "（Agent 首轮即终止，无交互）"
+        ),
+        "is_success": final_verdict == "attack_success",
+        "verdict_source": last_verdict_source,
+        "needs_review": last_needs_review,
+        "agent_state": agent_state or None,
+    }
+    _update_task(db, task_id, update)
+
+    # TODO(Phase 2): 更新 attack_patterns 的 use_count / success_count
+    # （长期记忆成功率反馈，见设计文档第 4.2 节）
 
     return {
         "task_id": task_id,
+        "status": "完成",
         "rounds": len(turns),
+        "verdict": final_verdict,
+        "verdict_source": last_verdict_source,
+        "needs_review": last_needs_review,
+        "is_success": final_verdict == "attack_success",
         "verdicts": verdicts,
-        # TODO: 会话级最终判定
     }

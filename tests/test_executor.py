@@ -111,7 +111,7 @@ class TestJudgeFallbackNeedsReview(unittest.TestCase):
         db = make_db()
         with (
             patch("app.executor.TargetModel") as mock_target,
-            patch("app.executor.LLMJudge") as mock_judge,
+            patch("app.judge.LLMJudge") as mock_judge,
         ):
             # 靶模型正常返回拒绝话术；裁判抛异常（如被 1301 过滤）
             mock_target.return_value.chat = AsyncMock(
