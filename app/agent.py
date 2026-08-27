@@ -183,11 +183,18 @@ async def run_probe(task_id: str, db: Client) -> dict[str, Any]:
         # 边界钉死：只有 payload 外发给目标模型；thought/action/stop_reason
         # 是内部状态，只进 probe_turns 表，永不进入 conversation。
         conversation.append({"role": "user", "content": action["payload"]})
+        # TODO: target.chat 抛 1301（httpx.HTTPStatusError 平台过滤）时的处理：
+        # 记一条 verdict_source=platform_filter 的轮次进 probe_turns 后 stop——
+        # 攻击通道被平台掐断，继续追问无意义，但不能让它炸掉整个 run_probe。
         response = await target.chat(conversation)
         conversation.append({"role": "assistant", "content": response})
 
         # Observation：双裁判判定本轮（TODO: 复用 executor 的 both 模式逻辑，
         # 抽到公共函数，避免与 executor.py 重复维护）
+        # TODO: judge_context = {**task} 是错的——裁判需要 pattern 的
+        # success_patterns/refusal_patterns，task 里没有。正确写法（executor.py
+        # 同款）：judge_context = {**pattern, "expected_behavior": task.get(...)}，
+        # 抽公共函数时一并修正。
         judge_context = {**task}
         regex_verdict = await regex_judge.judge(action["payload"], response, judge_context)
         # TODO: llm_verdict + verdict_source + needs_review 逻辑同 executor
