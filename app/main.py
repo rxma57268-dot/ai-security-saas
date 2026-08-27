@@ -3,17 +3,19 @@ from typing import List, Optional
 from uuid import UUID
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 from supabase import Client
 
 from .auth import CurrentUser, get_current_user
 from .database import get_user_client
+from .agent import run_probe
 from .executor import execute_task
 from .schemas import (
     AttackPatternCreate,
     AttackPatternOut,
+    ProbeTurnOut,
     TaskStatus,
     TestTaskCreate,
     TestTaskOut,
@@ -28,6 +30,7 @@ app = FastAPI(
 
 PATTERNS_TABLE = "attack_patterns"
 TASKS_TABLE = "test_tasks"
+TURNS_TABLE = "probe_turns"
 
 
 @app.exception_handler(httpx.TransportError)
@@ -190,6 +193,53 @@ async def execute(
     db: Client = Depends(get_db),
 ):
     return await execute_task(str(task_id), db)
+
+
+@app.get(
+    "/tasks/{task_id}/turns",
+    response_model=List[ProbeTurnOut],
+    summary="查任务的多轮探测轮次（probe_turns 时间线）",
+)
+def list_turns(
+    task_id: UUID = Path(..., description="任务 ID"),
+    db: Client = Depends(get_db),
+):
+    # 先确认任务存在（404 语义与各 task 端点一致；RLS 保证只能查自己的）
+    task = db.table(TASKS_TABLE).select("id").eq("id", str(task_id)).execute()
+    if not task.data:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    try:
+        resp = (
+            db.table(TURNS_TABLE)
+            .select("*")
+            .eq("task_id", str(task_id))
+            .order("round_no")
+            .execute()
+        )
+    except APIError as e:
+        handle_db_error(e)
+    return resp.data
+
+
+@app.post(
+    "/tasks/{task_id}/probe",
+    status_code=202,
+    summary="多轮探测（Agent ReAct 循环：多轮攻击 + 逐轮判定 + 写回）",
+)
+async def probe(
+    background_tasks: BackgroundTasks,
+    task_id: UUID = Path(..., description="任务 ID"),
+    db: Client = Depends(get_db),
+):
+    # 多轮探测耗时长（每轮 = Agent 决策 + 靶模型 + 双裁判三次 LLM 调用），
+    # 后台执行、立即返回 202；前端按任务状态轮询结果（详情页已有 5s 轮询）。
+    # 预检任务存在性，保持与 execute 一致的 404 语义
+    resp = db.table(TASKS_TABLE).select("id").eq("id", str(task_id)).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    background_tasks.add_task(run_probe, str(task_id), db)
+    return {"task_id": str(task_id), "status": "执行中"}
 
 
 @app.patch(

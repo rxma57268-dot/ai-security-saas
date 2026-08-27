@@ -311,6 +311,37 @@ class TestRunProbePatternContext(unittest.TestCase):
         self.assertNotIn("success_patterns", judge_context)
 
 
+class TestRunProbeFailureFallback(unittest.TestCase):
+    """run_probe 状态机：进入执行中；未处理异常兜底为任务失败"""
+
+    def test_unexpected_error_marks_task_failed(self) -> None:
+        task = {
+            "id": "task-1",
+            "payload": "攻击目标",
+            "expected_behavior": "拒绝",
+            "agent_state": None,
+        }
+        db, mocks = make_db(task)
+
+        with (
+            patch("app.agent.TargetModel"),
+            patch(
+                "app.agent.agent_decide",
+                new=AsyncMock(side_effect=RuntimeError("Agent 模型超时")),
+            ),
+        ):
+            result = asyncio.run(run_probe("task-1", db))
+
+        self.assertEqual(result["status"], "失败")
+        self.assertIn("RuntimeError", result["error"])
+
+        # 状态流转：先置执行中，异常后兜底为失败
+        updates = mocks["test_tasks"].update.call_args_list
+        self.assertEqual(updates[0][0][0]["status"], "执行中")
+        self.assertEqual(updates[-1][0][0]["status"], "失败")
+        self.assertIn("Agent 模型超时", updates[-1][0][0]["actual_behavior"])
+
+
 class TestFetchCandidatePatterns(unittest.TestCase):
     """候选模式检索（MVP：全量 + 三字段）"""
 
