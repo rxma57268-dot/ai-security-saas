@@ -239,6 +239,8 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
         verdicts = final.get("verdicts") or []
         agent_state = final.get("agent_state") or {}
         if turns:
+            # 重复探测：旧轮次整批替换（MVP 语义同 run_probe）
+            db.table(TURNS_TABLE).delete().eq("task_id", task_id).execute()
             db.table(TURNS_TABLE).insert(turns).execute()
 
         # 任务级最终判定：MVP 用最后一轮的 turn 级 verdict（会话级裁判 Phase 2）

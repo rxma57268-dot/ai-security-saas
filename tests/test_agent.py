@@ -228,7 +228,8 @@ class TestRunProbeWriteBack(unittest.TestCase):
         self.assertEqual(result["verdict_source"], "llm")
         self.assertFalse(result["needs_review"])
 
-        # probe_turns 批量插入 2 行
+        # probe_turns 批量插入 2 行（重复探测先整批删除旧轮次）
+        mocks["probe_turns"].delete.assert_called_once()
         inserted = mocks["probe_turns"].insert.call_args[0][0]
         self.assertEqual(len(inserted), 2)
         self.assertEqual(inserted[0]["round_no"], 1)
