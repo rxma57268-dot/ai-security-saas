@@ -332,6 +332,9 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
 
     # 落库：批量写轮次 + 写回任务
     if turns:
+        # 重复探测：旧轮次整批替换（MVP 只保留最近一次探测；
+        # 保留历史尝试是 Phase 2，加 attempt 列）
+        db.table(TURNS_TABLE).delete().eq("task_id", task_id).execute()
         db.table(TURNS_TABLE).insert(turns).execute()
 
     # 任务级最终判定：MVP 用最后一轮的 turn 级 verdict

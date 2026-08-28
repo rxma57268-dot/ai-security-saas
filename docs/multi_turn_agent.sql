@@ -36,6 +36,14 @@ create policy "probe_turns_insert_own" on probe_turns for insert
       and test_tasks.user_id = auth.uid()
   ));
 
+-- 重复探测时整批替换旧轮次（MVP 语义：只保留最近一次探测）
+create policy "probe_turns_delete_own" on probe_turns for delete
+  using (exists (
+    select 1 from test_tasks
+    where test_tasks.id = probe_turns.task_id
+      and test_tasks.user_id = auth.uid()
+  ));
+
 -- 2. test_tasks 加 Agent 状态列：压缩后的结构化摘要（长期记忆之短期部分）
 alter table test_tasks
   add column if not exists agent_state jsonb;
