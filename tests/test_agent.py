@@ -342,6 +342,69 @@ class TestRunProbeFailureFallback(unittest.TestCase):
         self.assertIn("Agent 模型超时", updates[-1][0][0]["actual_behavior"])
 
 
+class TestRunProbeGraph(unittest.TestCase):
+    """图版 run_probe_graph：wrapper 落库 + 失败兜底（与手写版语义一致）"""
+
+    def test_graph_writeback_and_stop_reason(self) -> None:
+        task = {
+            "id": "task-1",
+            "payload": "攻击目标",
+            "expected_behavior": "拒绝",
+            "agent_state": None,
+        }
+        db, mocks = make_db(task)
+
+        decisions = [
+            {"thought": "t1", "action": "follow_up", "pattern_id": None,
+             "payload": "p1", "stop": False, "stop_reason": ""},
+            {"thought": "t2", "action": "follow_up", "pattern_id": None,
+             "payload": "p2", "stop": False, "stop_reason": ""},
+        ]
+        verdicts = [("uncertain", "llm", True), ("attack_success", "llm", False)]
+        with (
+            patch("app.agent_graph.TargetModel") as mock_target,
+            patch("app.agent_graph.agent_decide", new=AsyncMock(side_effect=decisions)),
+            patch("app.agent_graph.judge_pair", new=AsyncMock(side_effect=verdicts)),
+        ):
+            mock_target.return_value.chat = AsyncMock(return_value="OK")
+            from app.agent_graph import run_probe_graph
+
+            result = asyncio.run(run_probe_graph("task-1", db))
+
+        self.assertEqual(result["rounds"], 2)
+        self.assertEqual(result["verdict"], "attack_success")
+        self.assertEqual(result["stop_reason"], "attack_success")
+
+        inserted = mocks["probe_turns"].insert.call_args[0][0]
+        self.assertEqual(len(inserted), 2)
+        update = mocks["test_tasks"].update.call_args[0][0]
+        self.assertEqual(update["status"], "完成")
+        self.assertTrue(update["is_success"])
+
+    def test_graph_internal_error_marks_task_failed(self) -> None:
+        """图内部异常（如 Agent 模型超时）→ 任务记失败，与手写版无差别"""
+        task = {
+            "id": "task-1",
+            "payload": "攻击目标",
+            "expected_behavior": "拒绝",
+            "agent_state": None,
+        }
+        db, mocks = make_db(task)
+
+        with patch(
+            "app.agent_graph.agent_decide",
+            new=AsyncMock(side_effect=RuntimeError("Agent 模型超时")),
+        ):
+            from app.agent_graph import run_probe_graph
+
+            result = asyncio.run(run_probe_graph("task-1", db))
+
+        self.assertEqual(result["status"], "失败")
+        updates = mocks["test_tasks"].update.call_args_list
+        self.assertEqual(updates[0][0][0]["status"], "执行中")
+        self.assertEqual(updates[-1][0][0]["status"], "失败")
+
+
 class TestFetchCandidatePatterns(unittest.TestCase):
     """候选模式检索（MVP：全量 + 三字段）"""
 

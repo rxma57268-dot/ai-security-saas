@@ -3,3 +3,4 @@ uvicorn[standard]>=0.29
 supabase>=2.5
 python-dotenv>=1.0
 pydantic>=2.6
+langgraph>=1.2
