@@ -251,6 +251,7 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
                 turns[-1]["response"] if turns else "（Agent 首轮即终止，无交互）"
             ),
             "is_success": final_verdict == "attack_success",
+            "verdict": final_verdict,
             "verdict_source": final.get("verdict_source"),
             "needs_review": final.get("needs_review") or False,
             "stop_reason": final.get("stop_reason"),
