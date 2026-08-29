@@ -112,6 +112,7 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
             "status": "完成",
             "actual_behavior": response,
             "is_success": verdict == "attack_success",
+            "verdict": verdict,
             "verdict_source": verdict_source,
             "needs_review": needs_review,
         }
@@ -136,6 +137,7 @@ async def execute_task(task_id: str, db: Client) -> dict[str, Any]:
                 "status": "完成",
                 "actual_behavior": f"被平台内容过滤拦截（1301）：{e.response.text[:200]}",
                 "is_success": False,
+                "verdict": "defense_success",
                 "verdict_source": "platform_filter",
                 "needs_review": False,
             }

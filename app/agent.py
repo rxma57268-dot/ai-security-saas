@@ -350,6 +350,7 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
             turns[-1]["response"] if turns else "（Agent 首轮即终止，无交互）"
         ),
         "is_success": final_verdict == "attack_success",
+        "verdict": final_verdict,
         "verdict_source": last_verdict_source,
         "needs_review": last_needs_review,
         "stop_reason": stop_reason,

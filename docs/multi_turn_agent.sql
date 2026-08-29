@@ -53,6 +53,11 @@ alter table test_tasks
 alter table test_tasks
   add column if not exists stop_reason text;
 
+-- 2.6 test_tasks 加任务级最终判定列：此前 verdict 只在接口返回值里，
+--     defense_success 和 uncertain 塌缩成 is_success=false 无法区分
+alter table test_tasks
+  add column if not exists verdict text;
+
 -- 3. attack_patterns 加成功率统计：长期记忆的"学习"闭环
 alter table attack_patterns
   add column if not exists use_count int not null default 0,
