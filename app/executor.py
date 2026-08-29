@@ -43,11 +43,20 @@ def _update_task(db: Client, task_id: str, data: dict[str, Any]) -> None:
 
 
 def _fail_result(task_id: str, db: Client, e: Exception) -> dict[str, Any]:
-    """异常 → 状态 → 失败，错误信息写入 actual_behavior 便于排查"""
+    """异常 → 状态 → 失败，错误信息写入 actual_behavior 便于排查。
+
+    verdict 写 uncertain（无法判定），并同步刷 is_success=False——
+    防止历史成功残留与本次失败矛盾（verdict/is_success 语义一致约束）。
+    """
     _update_task(
         db,
         task_id,
-        {"status": "失败", "actual_behavior": f"执行异常：{type(e).__name__}: {e}"},
+        {
+            "status": "失败",
+            "actual_behavior": f"执行异常：{type(e).__name__}: {e}",
+            "verdict": "uncertain",
+            "is_success": False,
+        },
     )
     return {
         "task_id": task_id,

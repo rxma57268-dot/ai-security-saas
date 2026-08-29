@@ -82,9 +82,10 @@ class TestPlatformContentFilter(unittest.TestCase):
         self.assertFalse(result["needs_review"])
         self.assertFalse(result["is_success"])
 
-        # 写库的最后一条 update 应包含判定字段
+        # 写库的最后一条 update 应包含判定字段（verdict 为任务级结论权威字段）
         written = db.table("test_tasks").update.call_args[0][0]
         self.assertEqual(written["status"], "完成")
+        self.assertEqual(written["verdict"], "defense_success")
         self.assertEqual(written["verdict_source"], "platform_filter")
         self.assertFalse(written["needs_review"])
         self.assertIn("1301", written["actual_behavior"])
@@ -103,6 +104,9 @@ class TestPlatformContentFilter(unittest.TestCase):
 
         written = db.table("test_tasks").update.call_args[0][0]
         self.assertEqual(written["status"], "失败")
+        # 兜底路径也写 verdict=uncertain，并同步刷 is_success=False 防历史残留
+        self.assertEqual(written["verdict"], "uncertain")
+        self.assertFalse(written["is_success"])
 
 
 class TestJudgeFallbackNeedsReview(unittest.TestCase):

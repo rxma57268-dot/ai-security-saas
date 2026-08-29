@@ -7,7 +7,13 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.agent import agent_decide, parse_agent_output, run_probe, should_stop
+from app.agent import (
+    agent_decide,
+    final_verdict_for,
+    parse_agent_output,
+    run_probe,
+    should_stop,
+)
 
 
 class TestParseAgentOutput(unittest.TestCase):
@@ -49,6 +55,45 @@ class TestParseAgentOutput(unittest.TestCase):
         result = parse_agent_output(text)
         self.assertTrue(result["stop"])
         self.assertEqual(result["stop_reason"], "无法突破")
+
+
+class TestFinalVerdictFor(unittest.TestCase):
+    """任务级最终判定：由终止原因推导（verdict 权威字段的映射表）"""
+
+    def test_attack_success(self) -> None:
+        self.assertEqual(
+            final_verdict_for("attack_success", ["uncertain", "attack_success"]),
+            "attack_success",
+        )
+
+    def test_consecutive_defense(self) -> None:
+        self.assertEqual(
+            final_verdict_for(
+                "consecutive_defense_success", ["defense_success", "defense_success"]
+            ),
+            "defense_success",
+        )
+
+    def test_max_rounds_means_defense(self) -> None:
+        """跑满未打穿 = 防御成功（即使末轮是 uncertain）"""
+        self.assertEqual(
+            final_verdict_for("max_rounds", ["uncertain"] * 8), "defense_success"
+        )
+
+    def test_platform_filter(self) -> None:
+        self.assertEqual(
+            final_verdict_for("platform_filter", ["defense_success"]),
+            "defense_success",
+        )
+
+    def test_agent_stop_uses_last_turn_verdict(self) -> None:
+        self.assertEqual(
+            final_verdict_for("agent_stop", ["defense_success", "uncertain"]),
+            "uncertain",
+        )
+
+    def test_no_turns_is_uncertain(self) -> None:
+        self.assertEqual(final_verdict_for("agent_output_invalid", []), "uncertain")
 
 
 class TestShouldStop(unittest.TestCase):
@@ -243,6 +288,7 @@ class TestRunProbeWriteBack(unittest.TestCase):
         self.assertFalse(update["needs_review"])
         self.assertEqual(update["actual_behavior"], "目标响应")
         self.assertEqual(update["stop_reason"], "attack_success")
+        self.assertEqual(update["verdict"], "attack_success")
 
 
 class TestRunProbePatternContext(unittest.TestCase):
@@ -382,6 +428,7 @@ class TestRunProbeGraph(unittest.TestCase):
         update = mocks["test_tasks"].update.call_args[0][0]
         self.assertEqual(update["status"], "完成")
         self.assertTrue(update["is_success"])
+        self.assertEqual(update["verdict"], "attack_success")
 
     def test_graph_internal_error_marks_task_failed(self) -> None:
         """图内部异常（如 Agent 模型超时）→ 任务记失败，与手写版无差别"""

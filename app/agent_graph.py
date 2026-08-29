@@ -35,6 +35,7 @@ from .agent import (
     TURNS_TABLE,
     agent_decide,
     fetch_candidate_patterns,
+    final_verdict_for,
     should_stop,
 )
 from .executor import (
@@ -243,8 +244,9 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
             db.table(TURNS_TABLE).delete().eq("task_id", task_id).execute()
             db.table(TURNS_TABLE).insert(turns).execute()
 
-        # 任务级最终判定：MVP 用最后一轮的 turn 级 verdict（会话级裁判 Phase 2）
-        final_verdict = verdicts[-1] if verdicts else "uncertain"
+        # 任务级最终判定：由终止原因推导（verdict 映射表见 final_verdict_for；
+        # 会话级裁判 Phase 2）
+        final_verdict = final_verdict_for(final.get("stop_reason"), verdicts)
         update: dict[str, Any] = {
             "status": "完成",
             "actual_behavior": (
