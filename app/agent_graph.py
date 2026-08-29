@@ -253,6 +253,7 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
             "is_success": final_verdict == "attack_success",
             "verdict_source": final.get("verdict_source"),
             "needs_review": final.get("needs_review") or False,
+            "stop_reason": final.get("stop_reason"),
             "agent_state": agent_state or None,
         }
         _update_task(db, task_id, update)

@@ -244,6 +244,7 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
     target = TargetModel()
     last_verdict_source: str | None = None
     last_needs_review = False
+    stop_reason: str | None = None
 
     # 候选模式检索：一次拉取（探测期间模式库不变，无需每轮查）
     candidate_patterns = fetch_candidate_patterns(db)
@@ -255,7 +256,8 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
             task, agent_state, turns, candidate_patterns, round_no
         )
         if action["stop"]:
-            logger.info("Agent 主动终止: %s", action["stop_reason"])
+            stop_reason = action["stop_reason"] or "agent_stop"
+            logger.info("Agent 主动终止: %s", stop_reason)
             break
 
         # Action 执行：发给靶模型（完整会话历史）
@@ -286,6 +288,7 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
             verdicts.append("defense_success")
             last_verdict_source = "platform_filter"
             last_needs_review = False
+            stop_reason = "platform_filter"
             logger.info("第 %d 轮被平台内容过滤拦截（1301），探测终止", round_no)
             break
         conversation.append({"role": "assistant", "content": response})
@@ -327,6 +330,7 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
         # 终止条件（机械条件）
         reason = should_stop(verdicts, round_no, MAX_ROUNDS)
         if reason:
+            stop_reason = reason
             logger.info("探测终止: %s（第 %d 轮）", reason, round_no)
             break
 
@@ -348,6 +352,7 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
         "is_success": final_verdict == "attack_success",
         "verdict_source": last_verdict_source,
         "needs_review": last_needs_review,
+        "stop_reason": stop_reason,
         "agent_state": agent_state or None,
     }
     _update_task(db, task_id, update)
@@ -364,4 +369,5 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
         "needs_review": last_needs_review,
         "is_success": final_verdict == "attack_success",
         "verdicts": verdicts,
+        "stop_reason": stop_reason,
     }

@@ -48,6 +48,11 @@ create policy "probe_turns_delete_own" on probe_turns for delete
 alter table test_tasks
   add column if not exists agent_state jsonb;
 
+-- 2.5 test_tasks 加终止原因列：探测为什么停（attack_success / consecutive_defense_success /
+--     max_rounds / platform_filter / agent_stop / agent_output_*），此前只在返回值和日志里
+alter table test_tasks
+  add column if not exists stop_reason text;
+
 -- 3. attack_patterns 加成功率统计：长期记忆的"学习"闭环
 alter table attack_patterns
   add column if not exists use_count int not null default 0,
