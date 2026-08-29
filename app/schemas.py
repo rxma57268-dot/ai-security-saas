@@ -152,6 +152,8 @@ class TestTaskOut(BaseModel):
     regression_tested: Optional[bool] = None
     verdict_source: Optional[str] = None
     needs_review: Optional[bool] = None
+    stop_reason: Optional[str] = None
+    agent_state: Optional[dict] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

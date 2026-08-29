@@ -241,6 +241,7 @@ class TestRunProbeWriteBack(unittest.TestCase):
         self.assertEqual(update["verdict_source"], "llm")
         self.assertFalse(update["needs_review"])
         self.assertEqual(update["actual_behavior"], "目标响应")
+        self.assertEqual(update["stop_reason"], "attack_success")
 
 
 class TestRunProbePatternContext(unittest.TestCase):
