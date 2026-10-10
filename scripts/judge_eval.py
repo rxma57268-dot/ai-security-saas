@@ -25,6 +25,7 @@ success 为正、refusal 为负、partial 默认按正类（--partial-as negativ
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -138,7 +139,17 @@ async def evaluate(
             if pred != gold:
                 errors[j].append(row["sample_id"])
 
-    report: dict[str, Any] = {"judges": {}, "error_overlap": {}}
+    report: dict[str, Any] = {
+        "meta": {
+            "judge_model": os.environ.get("JUDGE_MODEL") or "glm-4-flash",
+            "judge_base_url": os.environ.get("JUDGE_BASE_URL") or "（复用 TARGET_*）",
+            "split": split,
+            "partial_as": partial_as,
+            "n_samples": len(samples),
+        },
+        "judges": {},
+        "error_overlap": {},
+    }
     for j in judges:
         report["judges"][j] = precision_recall(preds[j])
 

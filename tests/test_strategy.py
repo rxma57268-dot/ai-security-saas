@@ -139,6 +139,59 @@ class TestStrategyLibraryJsonl(unittest.TestCase):
             self.assertEqual(out[0]["id"], "high")
 
 
+class TestEmbedCache(unittest.TestCase):
+    """embedding 缓存：成功结果进程内复用；失败结果不缓存（可重试）"""
+
+    def setUp(self) -> None:
+        from app.strategy import _EMBED_CACHE
+
+        _EMBED_CACHE.clear()
+
+    def test_success_cached(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import app.strategy as strategy
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"data": [{"embedding": [0.1, 0.2]}]}
+        with patch("app.strategy.httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=resp
+            )
+            import os
+
+            os.environ["TARGET_BASE_URL"] = "http://x"
+            os.environ["TARGET_API_KEY"] = "x"
+            a = asyncio.run(strategy.embed_text("同一文本"))
+            b = asyncio.run(strategy.embed_text("同一文本"))
+        self.assertEqual(a, b)
+        # 第二次命中缓存，API 只调了一次
+        self.assertEqual(
+            mock_client.return_value.__aenter__.return_value.post.await_count, 1
+        )
+
+    def test_failure_not_cached(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import app.strategy as strategy
+
+        resp = MagicMock()
+        resp.status_code = 500
+        with patch("app.strategy.httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=resp
+            )
+            r1 = asyncio.run(strategy.embed_text("抖动文本"))
+            r2 = asyncio.run(strategy.embed_text("抖动文本"))
+        self.assertIsNone(r1)
+        self.assertIsNone(r2)
+        # 失败不缓存：第二次是重试而非命中缓存
+        self.assertEqual(
+            mock_client.return_value.__aenter__.return_value.post.await_count, 2
+        )
+
+
 class TestCosineAndFormat(unittest.TestCase):
     def test_cosine(self) -> None:
         self.assertAlmostEqual(_cosine([1, 0], [1, 0]), 1.0)

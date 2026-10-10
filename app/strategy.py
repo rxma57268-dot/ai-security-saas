@@ -67,7 +67,10 @@ async def embed_text(text: str) -> list[float] | None:
                 result = resp.json()["data"][0]["embedding"]
         except Exception as e:
             logger.warning("embedding 调用异常: %s: %s", type(e).__name__, e)
-    _EMBED_CACHE[cache_key] = result
+    # 只缓存成功结果：瞬时网络抖动不该让该文本在进程生命周期内
+    # 永远检索不到（评审修复：失败不落缓存，下次检索会重试）
+    if result is not None:
+        _EMBED_CACHE[cache_key] = result
     return result
 
 

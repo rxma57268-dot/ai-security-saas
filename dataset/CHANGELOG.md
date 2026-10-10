@@ -43,6 +43,16 @@
   63 条；剩余 16 条裁判提示词本身被 1301 过滤，只能纯人工标注
 - 黄金集重抽样 + 重预标 + 审阅表 `golden_review.csv` 重新导出
 
+### 判官基线（2026-09-16，临时版）
+
+- `judge_baseline.json`：regex + both 双模式，dev 集 153 条，
+  裁判临时用 glm-4-flash（百炼欠费期间）；**百炼充值 + 人工标注完成后，
+  须用生产裁判（deepseek-v4.1-flash）重新生成**：
+  `python -m scripts.judge_eval --golden dataset/v1.0/golden.jsonl --judges regex both --save-baseline`
+- 基线含 meta 溯源字段（judge_model / split / 样本数）
+- 当前数字（预标口径）：regex P/R=0/0（地板基线，规则裁判字面匹配的
+  固有盲区）、both P=94.7% R=20.2%（R 偏低是预标噪声，待人工标注校准）
+
 ### 构建方式
 
 ```bash
