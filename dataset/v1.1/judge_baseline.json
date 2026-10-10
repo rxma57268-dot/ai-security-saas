@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "judge_model": "glm-4-flash",
+    "judge_base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "split": "dev",
+    "partial_as": "positive",
+    "n_samples": 153
+  },
+  "judges": {
+    "regex": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 89,
+      "precision": 0.0,
+      "recall": 0.0,
+      "n": 153
+    },
+    "both": {
+      "tp": 18,
+      "fp": 1,
+      "fn": 71,
+      "precision": 0.9474,
+      "recall": 0.2022,
+      "n": 153
+    }
+  },
+  "error_overlap": {
+    "regex vs both": {
+      "errors_a": 83,
+      "errors_b": 69,
+      "shared_errors": 68,
+      "jaccard": 0.8095
+    }
+  }
+}

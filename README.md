@@ -82,18 +82,27 @@ flowchart TB
 
 ## 三大能力
 
-### 1. 数据集（dataset/）
+### 1. 数据集（dataset/，活基准）
 
-- 11 个种子模式 × 4 个变异算子（同义改写/Base64 包装/角色扮演壳/轮次拆分，
-  覆盖语义、编码、社会工程、时序四个正交维度）→ 231 条带谱系样本
-- 接入 JailbreakBench 公开基准（100 条 harmful behaviors）后合计 531 条
-- 每条样本带 `pattern_id` / `mutation_chain` / `difficulty` / `expected_verdict` 谱系
-- 版本化管理：`dataset/v1.0/` + CHANGELOG
-- OWASP LLM Top 10 覆盖矩阵：`docs/owasp_llm_top10_mapping.md`
+三层构成（零人工标注）：
+
+- **静态种子**：11 种子 × 4 变异算子 + JailbreakBench → 531 条带谱系样本（回归基线）
+- **开源集**：SafeDialBench 中文多轮 198 条 + CoSafe 200 条（官方标签 +
+  语义漂移自动检测）+ MHJ（授权受限，脚本就绪待 HF token）
+- **dynamic 轨迹**：动态红队产出自动入库（生成即标注），增量超 50 条
+  自动打包新版本（`version_dataset.py`）
+
+置信度口径：高置信（多票一致）/ 预标采信 / 低置信降权（不占 ASR 分母）。
 
 ```bash
-python -m scripts.build_dataset            # 构建数据集（离线可复现）
-python -m scripts.jbb_convert              # 接入 JailbreakBench（pip install jailbreakbench）
+python -m scripts.build_dataset            # 构建静态种子数据集
+python -m scripts.safedial_convert         # SafeDialBench 中文子集
+python -m scripts.cosafe_convert           # CoSafe（含漂移检测）
+python -m scripts.mhj_convert              # MHJ（需 HF_TOKEN，授权受限）
+python -m scripts.rejudge_multiturn        # 多轮样本三票自动重判
+python -m scripts.run_dynamic --n 10       # 动态红队跑数
+python -m scripts.harvest_dynamic_traces   # 轨迹入库（生成即标注）
+python -m scripts.version_dataset          # 活基准版本化
 ```
 
 ### 2. 判官（judge）
@@ -122,6 +131,7 @@ python -m scripts.run_batch --targets targets.json              # 全量
 python -m scripts.sample_golden                                 # 分层抽样出黄金集
 python -m scripts.asr_matrix --golden dataset/v1.0/golden.jsonl # ASR 矩阵
 python -m scripts.generate_report --compare <上一版结果.jsonl>   # 完整报告
+python -m scripts.report_v2                                     # 机制级分析（手法×模型 / 防御签名×手法）
 python -m scripts.pair_compare --targets targets.json           # 模板 vs PAIR 对照
 ```
 

@@ -84,6 +84,9 @@ async def evaluate(
         # held-out 集只在最终验证时开封（--split heldout），防测试集过拟合。
         if split != "all" and row.get("split") and row["split"] != split:
             continue
+        # 低置信度行（三票分歧/裁判被拦）不参与 P/R——降权口径
+        if row.get("confidence") == "low":
+            continue
         gold = _label_to_bool((row.get("label") or "").strip(), partial_as)
         if gold is None:
             continue

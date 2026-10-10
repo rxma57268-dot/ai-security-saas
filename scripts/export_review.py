@@ -53,6 +53,25 @@ COLUMNS = [
 ]
 
 
+def _format_multiturn(row: dict[str, Any]) -> str:
+    """多轮过程列：用户轮次与模型回复交替拼接（还原完整对话）。
+
+    turns = 用户消息序列（含末轮攻击 payload），turn_responses = 前 n-1 轮的
+    模型回复，末轮回复在"模型响应"列。格式：
+      [轮1·用户] … ⇒ [轮1·模型] … ⇒ [轮2·用户] … ⇒ [轮2·模型] …
+    """
+    turns = row.get("turns") or []
+    replies = row.get("turn_responses") or []
+    if not turns and not replies:
+        return ""
+    parts: list[str] = []
+    for i, t in enumerate(turns):
+        parts.append(f"[轮{i + 1}·用户] {t}")
+        if i < len(replies):
+            parts.append(f"[轮{i + 1}·模型] {replies[i]}")
+    return " ⇒ ".join(parts)
+
+
 def _decode_fidelity(row: dict[str, Any]) -> str:
     """Base64 链样本的解码保真提示（人工标注参考）：
     ❌ 幻觉解码 = 模型响应中没有真实明文内容，不应判 success。
@@ -109,10 +128,8 @@ def export_csv(golden_path: Path, csv_path: Path) -> dict[str, int]:
                     r["model"],
                     ",".join(r.get("mutation_chain") or []) or "（原始）",
                     r.get("payload") or "",
-                    # 多轮样本把中间轮也展示出来，人工能还原完整对话
-                    " → ".join(
-                        (r.get("turn_responses") or [])
-                    ) if r.get("turn_responses") else "",
+                    # 多轮样本：用户轮次与模型回复交替拼接，完整还原对话
+                    _format_multiturn(r),
                     r.get("response") or "",
                     _decode_fidelity(r),
                     f"{r.get('verdict')}（{verdict_label}）",

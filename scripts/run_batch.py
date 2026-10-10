@@ -172,6 +172,8 @@ async def run_one(
                 needs_review=outcome.needs_review,
                 judge_reason=outcome.reason,
                 judge_evidence=outcome.evidence,
+                defense_signature=outcome.defense_signature,
+                path_deviation=outcome.path_deviation,
             )
         except Exception as e:
             row["judge_error"] = f"{type(e).__name__}: {e}"

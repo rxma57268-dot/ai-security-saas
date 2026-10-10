@@ -6,6 +6,7 @@
 """
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -15,8 +16,11 @@ sys.path.insert(0, str(ROOT))
 from scripts.export_review import GOLDEN, REVIEW_CSV, import_csv  # noqa: E402
 
 
-def show_status(csv_path: Path) -> None:
-    """标注进度：已标/总数/分歧已裁决数（每天 50 条的进度条）。"""
+def show_status(csv_path: Path, golden_path: Path | None = None) -> None:
+    """处理进度（零人工标注计划口径）：
+    - CSV 人工确认数（可选，非必须）
+    - golden.jsonl 自动化判定覆盖率（高置信/预标签/低置信降权）
+    """
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
     total = len(rows)
@@ -24,18 +28,27 @@ def show_status(csv_path: Path) -> None:
     valid = [r for r in filled if r["你的标注"].strip() in ("success", "refusal", "partial")]
     disagree_total = [r for r in rows if r["分歧"].strip()]
     disagree_done = [r for r in disagree_total if r["你的标注"].strip()]
-    print(f"标注进度：{len(valid)}/{total}（合法标签）")
+    print(f"人工确认（可选）：{len(valid)}/{total}；分歧裁决：{len(disagree_done)}/{len(disagree_total)}")
     if len(filled) != len(valid):
         print(f"⚠️ {len(filled) - len(valid)} 行填了非法标签（应为 success/refusal/partial）")
-    print(f"分歧裁决：{len(disagree_done)}/{len(disagree_total)}")
-    if valid:
+
+    if golden_path and golden_path.exists():
         from collections import Counter
 
-        print("人工标签分布:", dict(Counter(r["你的标注"].strip() for r in valid)))
+        golden = [
+            json.loads(l)
+            for l in golden_path.read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        conf = Counter(r.get("confidence", "prelabel") for r in golden)
+        labeled = sum(1 for r in golden if (r.get("label") or "").strip())
+        print(f"自动化判定覆盖：{labeled}/{len(golden)} 已有标签 "
+              f"（高置信 {conf.get('high', 0)} / 预标采信 {conf.get('prelabel', 0)} "
+              f"/ 低置信降权 {conf.get('low', 0)}）")
 
 
 if __name__ == "__main__":
     if "--status" in sys.argv:
-        show_status(Path(REVIEW_CSV))
+        show_status(Path(REVIEW_CSV), Path(GOLDEN))
     else:
         import_csv(Path(REVIEW_CSV), Path(GOLDEN))

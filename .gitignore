@@ -31,3 +31,5 @@ targets_ds.json
 
 # 压测 HTML 报告（陈旧产物）
 r*.html
+dataset/*/batch_results_ext.jsonl
+dataset/*/batch_*.log

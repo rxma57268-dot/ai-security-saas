@@ -1,5 +1,31 @@
 # 数据集 CHANGELOG
 
+## 开源集接入（2026-10-10）
+
+- **SafeDialBench 中文子集 198 条**（`safedialbench.jsonl`）：多轮安全对话，
+  官方任务设计即标签（生成即标注）。手法分布：场景构造 50 / 参考攻击 40 /
+  目的反转 38 / 探针提问 26 / 角色扮演 25 / 谬误攻击 13 / 话题转移 6
+- **CoSafe 200 条**（`cosafe.jsonl`）：官方类别标签 + 语义漂移自动检测
+  （embedding 优先；GLM embedding 额度耗尽时词面 Jaccard 兜底，
+  分位数口径打标 drift_suspect 47 条降权）
+- **MHJ 未接入**：ScaleAI/mhj 与镜像均为 HF 授权受限仓库（401），
+  `mhj_convert.py` 已就绪，配 HF_TOKEN 后一键转换
+- 两个开源集已对 glm-4-flash 全量跑批（`batch_results_ext.jsonl` 398 行，
+  欠费期间仅 GLM 可用）
+
+## 活基准机制（living benchmark，2026-10-10 起）
+数据集不再冻结，随使用自动生长：
+
+- **三层构成**：静态种子（`attacks.jsonl`，回归用）+ 开源集
+  （JailbreakBench/SafeDialBench/CoSafe，广度用）+ dynamic 轨迹
+  （`dynamic_traces.jsonl`，差异化用——动态红队的产出自动入库）
+- **生成即标注**：dynamic 轨迹的 judge 判定结果就是标签，不人工标注；
+  裁判分歧/uncertain 的行标 `needs_review=true` + 低置信降权
+- **版本化**：`python -m scripts.version_dataset`，dynamic 轨迹新增
+  ≥50 条自动打包新版本（v1.1、v1.2…），旧版本目录保留保证可复现
+- **置信度口径**：confidence ∈ high / prelabel / low；
+  low 行不占 ASR 分母（asr_matrix / judge_eval 均实现）
+
 ## v1.0（2026-09-14）
 
 首个版本化数据集。
@@ -43,8 +69,23 @@
   63 条；剩余 16 条裁判提示词本身被 1301 过滤，只能纯人工标注
 - 黄金集重抽样 + 重预标 + 审阅表 `golden_review.csv` 重新导出
 
-### 判官基线（2026-09-16，临时版）
+### 零人工标注转型（2026-10-10）
 
+220 条黄金集全部完成自动化判定，零人工标注：
+
+- **176 条单轮**：采信预标（confidence=prelabel）
+- **44 条多轮**：`scripts/rejudge_multiturn.py` funnel 三票制自动重判
+  （regex + LLM + Prompt Guard 矛盾检测；regex 的 uncertain 视为弃权）。
+  34 条三票一致 → 高置信；10 条 LLM uncertain → 低置信降权
+- **10 条预标失败**（裁判提示词被平台 1301 过滤）→ 低置信降权
+- 低置信度共 20 条：`needs_review=true` 但不人工审核，报告单独列出，
+  **不占 ASR 分母**（asr_matrix / judge_eval 均已实现该口径）
+- Prompt Guard 未参与本轮：meta-llama/Prompt-Guard-86M 是 HF 受限仓库，
+  需 HF token（待补）；本轮漏斗降级为 regex+LLM 两票
+- 验证：`python -m scripts.import_review --status` → 220/220 已处理
+  （高置信 34 / 预标采信 166 / 低置信降权 20）
+
+### 判官基线（2026-09-16，临时版）
 - `judge_baseline.json`：regex + both 双模式，dev 集 153 条，
   裁判临时用 glm-4-flash（百炼欠费期间）；**百炼充值 + 人工标注完成后，
   须用生产裁判（deepseek-v4.1-flash）重新生成**：
@@ -70,3 +111,9 @@ python -m scripts.build_dataset
 - 目录即版本：`dataset/v{major}.{minor}/`
 - major：种子/算子/字段结构的破坏性变更；minor：样本增补、规则修正
 - 每次变更必须更新本 CHANGELOG 并随 Git 提交
+
+## v1.1（2026-10-10）
+
+- 自 v1.0 以来新增 dynamic 轨迹 9 条
+- 打包文件：attacks.jsonl, jailbreakbench.jsonl, golden.jsonl, golden_review.csv, judge_baseline.json, dynamic_traces.jsonl, safedialbench.jsonl, cosafe.jsonl
+- 主要发现：首次动态红队轨迹入库（9 条，dynamic 模式首跑验证）
