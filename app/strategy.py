@@ -12,6 +12,7 @@ Embedding：OpenAI 兼容 /embeddings 端点（默认智谱 embedding-3，2048 �
 用 EMBEDDING_* 环境变量可换厂商。
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -28,9 +29,18 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STRATEGIES_JSONL = ROOT / "dataset" / "strategies.jsonl"
 
+# embedding 内存缓存（评审 P2 修复）：JSONL 模式每次检索不再对每条候选
+# 策略重复调 embedding API——按内容 hash 命中进程内缓存
+_EMBED_CACHE: dict[str, list[float] | None] = {}
+
 
 async def embed_text(text: str) -> list[float] | None:
-    """文本向量化（OpenAI 兼容 embeddings 端点）。失败返回 None（降级不检索）。"""
+    """文本向量化（OpenAI 兼容 embeddings 端点）。失败返回 None（降级不检索）。
+    同一文本进程内只调一次（内容 hash 缓存）。"""
+    cache_key = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    if cache_key in _EMBED_CACHE:
+        return _EMBED_CACHE[cache_key]
+
     base_url = (
         os.environ.get("EMBEDDING_BASE_URL")
         or os.environ.get("TARGET_BASE_URL")
@@ -39,25 +49,26 @@ async def embed_text(text: str) -> list[float] | None:
         os.environ.get("EMBEDDING_API_KEY") or os.environ.get("TARGET_API_KEY")
     )
     model = os.environ.get("EMBEDDING_MODEL") or "embedding-3"
-    if not base_url or not api_key:
-        return None
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(REQUEST_TIMEOUT),
-            transport=AsyncRetryTransport(),
-        ) as client:
-            resp = await client.post(
-                f"{base_url.rstrip('/')}/embeddings",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": model, "input": text},
-            )
-        if resp.status_code != 200:
-            logger.warning("embedding 调用失败: HTTP %s", resp.status_code)
-            return None
-        return resp.json()["data"][0]["embedding"]
-    except Exception as e:
-        logger.warning("embedding 调用异常: %s: %s", type(e).__name__, e)
-        return None
+    result: list[float] | None = None
+    if base_url and api_key:
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(REQUEST_TIMEOUT),
+                transport=AsyncRetryTransport(),
+            ) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/embeddings",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"model": model, "input": text},
+                )
+            if resp.status_code != 200:
+                logger.warning("embedding 调用失败: HTTP %s", resp.status_code)
+            else:
+                result = resp.json()["data"][0]["embedding"]
+        except Exception as e:
+            logger.warning("embedding 调用异常: %s: %s", type(e).__name__, e)
+    _EMBED_CACHE[cache_key] = result
+    return result
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

@@ -3,7 +3,7 @@ from typing import NamedTuple, Optional
 import httpx
 from fastapi import Header, HTTPException
 
-from .database import supabase
+from .database import get_service_client
 
 try:
     # supabase-py >= 2.10 左右起，auth 库独立为 supabase_auth
@@ -31,7 +31,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> Cur
         raise HTTPException(status_code=401, detail="缺少 Bearer Token")
 
     try:
-        resp = supabase.auth.get_user(token)
+        resp = get_service_client().auth.get_user(token)
     except AuthApiError:
         # token 无效/过期：认证失败
         raise HTTPException(status_code=401, detail="Token 无效或已过期")

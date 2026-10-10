@@ -465,7 +465,15 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
 
         # 上下文压缩：Agent 思考上下文超窗口时
         if len(turns) > COMPRESS_AFTER:
-            agent_state = await compress_state(agent_state, turns[:-RECENT_WINDOW])
+            try:
+                agent_state = await compress_state(agent_state, turns[:-RECENT_WINDOW])
+            except NotImplementedError:
+                # 压缩未实现（Phase 2）：降级为硬截断，探测继续而不是崩溃
+                # （评审 P1 修复：MAX_ROUNDS 调大后这里曾是定时炸弹）
+                logger.warning(
+                    "compress_state 未实现，降级为截断旧轮次（保留最近 %d 轮）",
+                    RECENT_WINDOW,
+                )
             turns[:] = turns[-RECENT_WINDOW:]
 
         # 终止条件（机械条件）

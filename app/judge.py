@@ -65,8 +65,6 @@ _VALID_DEVIATIONS: tuple[str, ...] = (
 # 攻击模式记录（attack_patterns 表的一行），含 success_patterns / refusal_patterns
 AttackPatternRecord = dict[str, Any]
 
-_VALID_VERDICTS: tuple[str, ...] = ("attack_success", "defense_success", "uncertain")
-
 # prompt 模板是可迭代的资产，单独存文件
 _PROMPT_TEMPLATE = (Path(__file__).parent / "llm_judge_prompt.md").read_text(
     encoding="utf-8"
@@ -197,14 +195,6 @@ class RegexJudge(Judge):
         detail = await self.judge_detail(payload, response, pattern)
         return detail.verdict
 
-
-class LLMJudge(Judge):
-    """LLM-as-judge：用裁判模型判定攻击是否成功。
-
-    裁判模型默认复用 TARGET_* 配置，可用 JUDGE_MODEL 覆盖模型名
-    （默认 glm-4-flash）。网络重试沿用 TargetModel 的 AsyncRetryTransport。
-    裁判是测量工具而非被测对象：固定 temperature=0 消除判定噪声。
-    """
 
 class LLMJudge(Judge):
     """LLM-as-judge：用裁判模型判定攻击是否成功。

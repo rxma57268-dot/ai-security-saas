@@ -9,14 +9,17 @@ from supabase.lib.client_options import SyncClientOptions
 
 load_dotenv()
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "缺少环境变量 SUPABASE_URL 或 SUPABASE_KEY，"
-        "请在 .env 文件或系统环境变量中配置后重启服务。"
-    )
+# 环境变量延迟到首次使用时校验（懒加载）：import 本模块不炸——
+# CI/单测环境没有 .env 也要能 import（评审 P0 修复）。
+def _require_env() -> tuple[str, str]:
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        raise RuntimeError(
+            "缺少环境变量 SUPABASE_URL 或 SUPABASE_KEY，"
+            "请在 .env 文件或系统环境变量中配置后重启服务。"
+        )
+    return url, key
 
 # ---------- 网络容错配置 ----------
 REQUEST_TIMEOUT = 30.0  # 单次请求超时（秒）
@@ -90,7 +93,20 @@ _options = SyncClientOptions(
     function_client_timeout=REQUEST_TIMEOUT,
 )
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, options=_options)
+_service_client: Client | None = None
+
+
+def get_service_client() -> Client:
+    """全局 service client（懒加载，首次调用时才校验环境变量并建连）。
+
+    注意：此处 key 应为 anon key——RLS 靠每请求 get_user_client 的用户
+    token 生效；service_role key 会绕过 RLS，严禁使用。
+    """
+    global _service_client
+    if _service_client is None:
+        url, key = _require_env()
+        _service_client = create_client(url, key, options=_options)
+    return _service_client
 
 
 def get_user_client(token: str) -> Client:
@@ -98,11 +114,9 @@ def get_user_client(token: str) -> Client:
 
     通过 postgrest.auth(token) 把用户 token 设置到 PostgREST 请求头，
     数据库侧会以 authenticated 角色 + auth.uid() 执行 RLS 策略。
-    每个请求应创建独立 client，不要复用全局 supabase（避免串号）。
-
-    注意：.publishable/anon key 本身不绕过 RLS，真正的行级隔离由 RLS 策略 +
-    用户 token 共同完成；service_role key 会绕过 RLS，严禁用于此用途。
+    每个请求应创建独立 client，不要复用全局 client（避免串号）。
     """
-    client = create_client(SUPABASE_URL, SUPABASE_KEY, options=_options)
+    url, key = _require_env()
+    client = create_client(url, key, options=_options)
     client.postgrest.auth(token)
     return client

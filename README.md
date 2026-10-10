@@ -14,7 +14,9 @@ AI 安全测试 SaaS：场景化安全检测 + PoC 动态验证 + 红队基准�
 
 ```bash
 # 本地（Python 3.12+）
-python -m venv .venv && .venv\Scripts\activate   # Windows
+python -m venv .venv
+source .venv/bin/activate        # Linux/macOS
+# .venv\Scripts\activate         # Windows PowerShell
 pip install -r requirements.txt
 uvicorn app.main:app --port 8000
 
@@ -27,7 +29,7 @@ docker-compose up --build
 - 本地：`supabase start` 起本地栈，`.env` 指向 `http://localhost:54321`
 
 **数据库迁移**：依次在 Supabase SQL Editor 执行
-`docs/attack_patterns_v2.sql` → `docs/multi_turn_agent.sql` → `docs/sprint0_probe_runs.sql` → `docs/v3_dynamic_redteam.sql`
+`docs/schema.sql`（基础表，全新项目从这开始）→ `docs/attack_patterns_v2.sql` → `docs/multi_turn_agent.sql` → `docs/sprint0_probe_runs.sql` → `docs/v3_dynamic_redteam.sql`
 
 环境变量（`.env`，完整注释见 `.env.example`）：
 
