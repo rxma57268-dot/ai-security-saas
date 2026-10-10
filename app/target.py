@@ -40,6 +40,10 @@ class TargetModel:
                 "请在 .env 文件或系统环境变量中配置。"
             )
 
+        # 最近一次调用的 token 用量（OpenAI 兼容响应的 usage 字段，可能为 None）。
+        # 供探测循环统计 token 成本（Sprint 0/4：probe_runs 落库、PAIR 成本记录）。
+        self.last_usage: dict[str, Any] | None = None
+
     async def chat(
         self, messages: list[Message], temperature: float | None = None
     ) -> str:
@@ -77,6 +81,7 @@ class TargetModel:
             )
 
         data = resp.json()
+        self.last_usage = data.get("usage")
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:

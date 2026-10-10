@@ -4,3 +4,11 @@ supabase>=2.5
 python-dotenv>=1.0
 pydantic>=2.6
 langgraph>=1.2
+
+# 可选依赖（按需安装，不装不影响核心链路）：
+#   Sprint 3 第三判官 Prompt Guard 86M（CPU）：
+#     transformers>=4.44 torch>=2.2
+#   Sprint 1 公开基准 JailbreakBench：
+#     jailbreakbench
+#   Sprint 5 Agent 注入基准 AgentDojo：
+#     agentdojo

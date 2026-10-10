@@ -41,6 +41,8 @@ COMPARE_KEYS = [
 
 def make_fakes():
     """每次运行生成独立的迭代器（iter 会被消耗，两版各需一份）。"""
+    from app.judge import JudgeOutcome
+
     agent_iter = iter(AGENT_SCRIPT)
     target_iter = iter(TARGET_SCRIPT)
     judge_iter = iter(JUDGE_SCRIPT)
@@ -49,6 +51,9 @@ def make_fakes():
         return next(agent_iter)
 
     class FakeModel:
+        model = "fake-model"
+        last_usage = None
+
         def __init__(self, *a, **k):
             pass
 
@@ -56,7 +61,7 @@ def make_fakes():
             return next(target_iter)
 
     fake_judge_pair = AsyncMock(side_effect=[
-        (v, "llm", False) for v in judge_iter
+        JudgeOutcome(v, "llm", False) for v in judge_iter
     ])
     return fake_decide, FakeModel, fake_judge_pair
 
@@ -130,7 +135,10 @@ async def main() -> None:
             ok = False
         print(f"  {match} update.{k}: {a!r} == {b!r}")
 
-    same_turns = loop_turns == graph_turns
+    # probe_run_id 是各自 mock 库生成的 id，不属于等价性语义，比较前剔除
+    strip = lambda turns: [{k: v for k, v in t.items() if k != "probe_run_id"}
+                           for t in turns]  # noqa: E731
+    same_turns = strip(loop_turns) == strip(graph_turns)
     ok = ok and same_turns
     print(f"  {'✓' if same_turns else '✗'} probe_turns 轮次记录完全一致（{len(loop_turns)} 轮）")
 

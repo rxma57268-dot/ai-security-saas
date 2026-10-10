@@ -153,6 +153,13 @@ class TestTaskOut(BaseModel):
     verdict: Optional[str] = None
     verdict_source: Optional[str] = None
     needs_review: Optional[bool] = None
+    # Sprint 0：裁判理由/证据落库 + 靶模型版本快照 + 最新 run 指针
+    judge_reason: Optional[str] = None
+    judge_evidence: Optional[str] = None
+    target_model: Optional[str] = None
+    latest_probe_run_id: Optional[UUID] = None
+    # v3：防御签名（策略库两级检索的第一级）
+    defense_signature: Optional[str] = None
     stop_reason: Optional[str] = None
     agent_state: Optional[dict] = None
     created_at: Optional[datetime] = None
@@ -161,9 +168,36 @@ class TestTaskOut(BaseModel):
 
 # ---------- 多轮探测 ----------
 
+class ProbeRunOut(BaseModel):
+    """探测历史（Sprint 0 append-only）：每次执行一行，绑定模型版本快照"""
+
+    id: UUID
+    task_id: UUID
+    entrypoint: Optional[str] = None  # execute / probe / batch
+    probe_mode: Optional[str] = None  # single / template / pair
+    target_model: Optional[str] = None
+    judge_model: Optional[str] = None
+    agent_model: Optional[str] = None
+    rounds: Optional[int] = None
+    final_verdict: Optional[str] = None
+    verdict_source: Optional[str] = None
+    needs_review: Optional[bool] = None
+    stop_reason: Optional[str] = None
+    judge_reason: Optional[str] = None
+    judge_evidence: Optional[str] = None
+    defense_signature: Optional[str] = None
+    path_deviation: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
 class ProbeTurnOut(BaseModel):
     id: UUID
     task_id: UUID
+    probe_run_id: Optional[UUID] = None
     round_no: int
     agent_thought: Optional[str] = None
     action: Optional[str] = None
@@ -172,4 +206,25 @@ class ProbeTurnOut(BaseModel):
     response: Optional[str] = None
     verdict: Optional[str] = None
     verdict_source: Optional[str] = None
+    judge_reason: Optional[str] = None
+    judge_evidence: Optional[str] = None
+    defense_signature: Optional[str] = None
+    path_deviation: Optional[str] = None
+    tool_calls: Optional[list] = None
+    strategies_used: Optional[list] = None
+    created_at: Optional[datetime] = None
+
+
+class AttackStrategyOut(BaseModel):
+    """攻击策略（v3 Sprint 4C 策略库，append-only 门禁：pending→approved）"""
+
+    id: UUID
+    technique_sequence: Optional[list[str]] = None
+    defense_signature: Optional[str] = None
+    trials: Optional[int] = None
+    successes: Optional[int] = None
+    success_rate: Optional[float] = None
+    example_turn_ids: Optional[list] = None
+    lineage: Optional[dict] = None
+    status: Optional[str] = None
     created_at: Optional[datetime] = None

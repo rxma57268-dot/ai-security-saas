@@ -19,3 +19,15 @@ __pycache__/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# 跑批/报告产物（数据集本身进 Git，跑批结果太大不进）
+dataset/*/batch_results.jsonl
+dataset/*/golden_candidates.jsonl
+report/
+targets.json
+targets_qwen.json
+targets_glm.json
+targets_ds.json
+
+# 压测 HTML 报告（陈旧产物）
+r*.html

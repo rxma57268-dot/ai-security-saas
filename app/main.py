@@ -17,9 +17,12 @@ from .auth import CurrentUser, get_current_user
 from .database import get_user_client
 from .agent import run_probe
 from .executor import execute_task
+from .report import build_summary
 from .schemas import (
     AttackPatternCreate,
     AttackPatternOut,
+    AttackStrategyOut,
+    ProbeRunOut,
     ProbeTurnOut,
     TaskStatus,
     TestTaskCreate,
@@ -36,6 +39,8 @@ app = FastAPI(
 PATTERNS_TABLE = "attack_patterns"
 TASKS_TABLE = "test_tasks"
 TURNS_TABLE = "probe_turns"
+RUNS_TABLE = "probe_runs"
+STRATEGIES_TABLE = "attack_strategies"
 
 
 @app.exception_handler(httpx.TransportError)
@@ -125,16 +130,8 @@ def create_task(
     db: Client = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
-    # 显式校验外键，给出更友好的错误信息
-    pattern = (
-        db.table(PATTERNS_TABLE)
-        .select("id")
-        .eq("id", str(body.attack_pattern_id))
-        .execute()
-    )
-    if not pattern.data:
-        raise HTTPException(status_code=400, detail="关联的 attack_pattern_id 不存在")
-
+    # 外键校验交给数据库约束：非法 attack_pattern_id 触发 23503，
+    # 由 handle_db_error 映射为同样的 400——省掉一次串行 SELECT 往返
     data = body.model_dump(mode="json")
     data["user_id"] = user.user_id
     try:
@@ -203,22 +200,64 @@ async def execute(
 @app.get(
     "/tasks/{task_id}/turns",
     response_model=List[ProbeTurnOut],
-    summary="查任务的多轮探测轮次（probe_turns 时间线）",
+    summary="查任务的多轮探测轮次（默认最新一次 run，可指定 probe_run_id）",
 )
 def list_turns(
     task_id: UUID = Path(..., description="任务 ID"),
+    probe_run_id: Optional[UUID] = Query(default=None, description="指定历史 run"),
     db: Client = Depends(get_db),
 ):
     # 先确认任务存在（404 语义与各 task 端点一致；RLS 保证只能查自己的）
     task = db.table(TASKS_TABLE).select("id").eq("id", str(task_id)).execute()
     if not task.data:
         raise HTTPException(status_code=404, detail="任务不存在")
+
+    run_id = str(probe_run_id) if probe_run_id else None
+    if not run_id:
+        # Sprint 0 起 append-only：默认展示最新一次 run 的轮次；
+        # 迁移前的历史轮次（probe_run_id 为空）在无 run 时兜底返回
+        run = (
+            db.table(RUNS_TABLE)
+            .select("id")
+            .eq("task_id", str(task_id))
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if run.data:
+            run_id = run.data[0]["id"]
+
+    try:
+        query = db.table(TURNS_TABLE).select("*").eq("task_id", str(task_id))
+        if run_id:
+            query = query.eq("probe_run_id", run_id)
+        else:
+            # 该任务还没有任何 probe_run：返回迁移前的无归属历史轮次
+            query = query.is_("probe_run_id", "null")
+        resp = query.order("round_no").execute()
+    except APIError as e:
+        handle_db_error(e)
+    return resp.data
+
+
+@app.get(
+    "/tasks/{task_id}/runs",
+    response_model=List[ProbeRunOut],
+    summary="查任务的探测历史（append-only，Sprint 0 起）",
+)
+def list_runs(
+    task_id: UUID = Path(..., description="任务 ID"),
+    db: Client = Depends(get_db),
+):
+    task = db.table(TASKS_TABLE).select("id").eq("id", str(task_id)).execute()
+    if not task.data:
+        raise HTTPException(status_code=404, detail="任务不存在")
     try:
         resp = (
-            db.table(TURNS_TABLE)
+            db.table(RUNS_TABLE)
             .select("*")
             .eq("task_id", str(task_id))
-            .order("round_no")
+            .order("created_at", desc=True)
             .execute()
         )
     except APIError as e:
@@ -257,6 +296,70 @@ async def _run_probe_background(task_id: str, token: str) -> None:
     """
     db = get_user_client(token)
     await run_probe(task_id, db)
+
+
+@app.get(
+    "/reports/summary",
+    summary="汇总报表（Sprint 6）：ASR 矩阵 + 翻转告警 + 成本统计",
+)
+def report_summary(db: Client = Depends(get_db)):
+    try:
+        return build_summary(db)
+    except APIError as e:
+        handle_db_error(e)
+
+
+@app.get(
+    "/strategies",
+    response_model=List[AttackStrategyOut],
+    summary="查攻击策略库（v3 Sprint 4C，默认只显示门禁通过的 approved）",
+)
+def list_strategies(
+    status: Optional[str] = Query(default="approved", description="门禁状态过滤"),
+    defense_signature: Optional[str] = Query(default=None, description="按防御签名过滤"),
+    db: Client = Depends(get_db),
+):
+    try:
+        query = db.table(STRATEGIES_TABLE).select(
+            "id,technique_sequence,defense_signature,trials,successes,"
+            "success_rate,example_turn_ids,lineage,status,created_at"
+        )
+        if status:
+            query = query.eq("status", status)
+        if defense_signature:
+            query = query.eq("defense_signature", defense_signature)
+        resp = query.order("success_rate", desc=True).execute()
+    except APIError as e:
+        handle_db_error(e)
+    return resp.data
+
+
+@app.patch(
+    "/strategies/{strategy_id}",
+    response_model=AttackStrategyOut,
+    summary="策略门禁审核（pending → approved/rejected）",
+)
+def review_strategy(
+    body: dict,
+    strategy_id: UUID = Path(..., description="策略 ID"),
+    db: Client = Depends(get_db),
+):
+    """策略入库门禁（锁定决策：防 reward hacking，自动化产出不直接进生产库）"""
+    new_status = body.get("status")
+    if new_status not in ("approved", "rejected", "pending"):
+        raise HTTPException(status_code=400, detail="status 须为 approved/rejected/pending")
+    try:
+        resp = (
+            db.table(STRATEGIES_TABLE)
+            .update({"status": new_status})
+            .eq("id", str(strategy_id))
+            .execute()
+        )
+    except APIError as e:
+        handle_db_error(e)
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return resp.data[0]
 
 
 @app.patch(

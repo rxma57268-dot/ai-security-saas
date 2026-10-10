@@ -45,21 +45,23 @@ def make_http_error(status: int, body: dict) -> httpx.HTTPStatusError:
 
 
 def make_db() -> MagicMock:
-    """模拟 Supabase client：tasks 表查到 TASK，patterns 表查到 PATTERN。"""
+    """模拟 Supabase client：tasks 表查到 TASK，patterns 表查到 PATTERN，
+    其余表（probe_runs/probe_turns）惰性生成独立 MagicMock 便于事后检查。"""
     db = MagicMock()
-
-    task_query = MagicMock()
-    task_query.select.return_value.eq.return_value.execute.return_value.data = [TASK]
-
-    pattern_query = MagicMock()
-    pattern_query.select.return_value.eq.return_value.execute.return_value.data = [
-        PATTERN
-    ]
+    mocks: dict = {}
 
     def table(name: str) -> MagicMock:
-        return task_query if name == "test_tasks" else pattern_query
+        if name not in mocks:
+            mocks[name] = MagicMock(name=f"table({name})")
+        return mocks[name]
 
     db.table.side_effect = table
+    mocks["test_tasks"] = MagicMock()
+    mocks["test_tasks"].select.return_value.eq.return_value.execute.return_value.data = [TASK]
+    mocks["attack_patterns"] = MagicMock()
+    mocks["attack_patterns"].select.return_value.eq.return_value.execute.return_value.data = [
+        PATTERN
+    ]
     return db
 
 
@@ -121,7 +123,7 @@ class TestJudgeFallbackNeedsReview(unittest.TestCase):
             mock_target.return_value.chat = AsyncMock(
                 return_value="抱歉，我不能协助你进行这个操作。"
             )
-            mock_judge.return_value.judge = AsyncMock(
+            mock_judge.return_value.judge_detail = AsyncMock(
                 side_effect=RuntimeError("裁判被平台过滤")
             )
             result = asyncio.run(execute_task("task-1", db))
@@ -133,6 +135,46 @@ class TestJudgeFallbackNeedsReview(unittest.TestCase):
 
         written = db.table("test_tasks").update.call_args[0][0]
         self.assertTrue(written["needs_review"])
+
+    def test_run_history_recorded_with_reason_evidence(self) -> None:
+        """Sprint 0：execute 也走 append-only 账本——probe_run + probe_turn 落库，
+        裁判 reason/evidence 与靶模型版本快照随判定写回任务"""
+        from app.judge import JudgeDetail
+
+        db = make_db()
+        with (
+            patch("app.executor.TargetModel") as mock_target,
+            patch("app.judge.LLMJudge") as mock_judge,
+        ):
+            mock_target.return_value.chat = AsyncMock(
+                return_value="抱歉，我不能协助你进行这个操作。"
+            )
+            mock_target.return_value.model = "glm-4-flash"
+            mock_judge.return_value.judge_detail = AsyncMock(
+                return_value=JudgeDetail(
+                    "defense_success", "明确拒绝", "不能协助", "hard_refusal"
+                )
+            )
+            result = asyncio.run(execute_task("task-1", db))
+
+        self.assertEqual(result["status"], "完成")
+        # probe_runs 插了一行（append-only，无 delete）
+        runs_table = db.table("probe_runs")
+        runs_table.insert.assert_called()
+        run_row = runs_table.insert.call_args[0][0]
+        self.assertEqual(run_row["entrypoint"], "execute")
+        self.assertEqual(run_row["probe_mode"], "single")
+        self.assertEqual(run_row["target_model"], "glm-4-flash")
+        # probe_turns 插了一条带 reason 的轮次
+        turns_table = db.table("probe_turns")
+        turns_table.insert.assert_called()
+        turn_row = turns_table.insert.call_args[0][0]
+        self.assertEqual(turn_row["round_no"], 1)
+        self.assertIsNotNone(turn_row["judge_reason"])
+        # 任务写回带模型快照与裁判理由
+        written = db.table("test_tasks").update.call_args[0][0]
+        self.assertEqual(written["target_model"], "glm-4-flash")
+        self.assertIn("judge_reason", written)
 
 
 if __name__ == "__main__":

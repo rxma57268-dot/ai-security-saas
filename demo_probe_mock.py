@@ -45,6 +45,9 @@ JUDGE_VERDICTS = iter(["defense_success", "uncertain", "attack_success"])
 class FakeModel:
     """按 temperature 区分角色：0.0=Agent 模型，None=靶模型。"""
 
+    model = "fake-model"
+    last_usage = None
+
     def __init__(self, *args, **kwargs) -> None:
         pass
 
@@ -63,6 +66,12 @@ class FakeJudge:
     async def judge(self, payload, response, pattern):
         return next(JUDGE_VERDICTS)
 
+    async def judge_detail(self, payload, response, pattern):
+        from app.judge import JudgeDetail
+
+        verdict = next(JUDGE_VERDICTS)
+        return JudgeDetail(verdict, f"预设判定：{verdict}")
+
 
 def make_db(task: dict):
     """内存 mock DB：按表名分发 MagicMock，便于事后检查写库内容。"""
@@ -80,6 +89,11 @@ def make_db(task: dict):
     mocks["attack_patterns"] = MagicMock()
     mocks["attack_patterns"].select.return_value.execute.return_value.data = [
         {"id": "p1", "name": "角色扮演-老师", "attack_category": "角色扮演"}
+    ]
+    # probe_runs 账本（Sprint 0）：insert 返回固定 run id，保持返回值可 JSON 序列化
+    mocks["probe_runs"] = MagicMock()
+    mocks["probe_runs"].insert.return_value.execute.return_value.data = [
+        {"id": "run-demo-1"}
     ]
     return db, mocks
 

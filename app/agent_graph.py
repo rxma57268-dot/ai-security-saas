@@ -31,6 +31,7 @@ from supabase import Client
 
 from .agent import (
     MAX_ROUNDS,
+    PROBE_MODE,
     TASKS_TABLE,
     TURNS_TABLE,
     agent_decide,
@@ -45,6 +46,13 @@ from .executor import (
     _update_task,
 )
 from .judge import Verdict, judge_pair
+from .probe_runs import (
+    create_probe_run,
+    finalize_probe_run,
+    resolve_agent_model,
+    resolve_judge_model,
+    usage_tokens,
+)
 from .target import TargetModel
 
 logger = logging.getLogger(__name__)
@@ -57,6 +65,8 @@ class ProbeState(TypedDict, total=False):
 
     task_id: str
     task: dict[str, Any]
+    # Sprint 0：所属 probe_run（append-only 账本）
+    probe_run_id: str | None
     # 发靶模型的完整会话：不裁剪（测的就是长对话行为），add 追加
     conversation: Annotated[list[dict[str, str]], add]
     # 轮次记录（probe_turns 行），add 追加
@@ -72,6 +82,13 @@ class ProbeState(TypedDict, total=False):
     # 写回任务用的末轮信息
     verdict_source: str | None
     needs_review: bool
+    judge_reason: str | None
+    judge_evidence: str | None
+    defense_signature: str | None
+    path_deviation: str | None
+    # token 成本（靶模型侧）
+    prompt_tokens: int
+    completion_tokens: int
     # 终止原因（None=继续）：agent_stop / attack_success /
     # consecutive_defense_success / max_rounds / platform_filter
     stop_reason: str | None
@@ -122,6 +139,7 @@ def make_attack_node(target: TargetModel):
                 "conversation": [user_msg],
                 "turns": [{
                     "task_id": state["task_id"],
+                    "probe_run_id": state.get("probe_run_id"),
                     "round_no": round_no,
                     "agent_thought": action["thought"],
                     "action": action["action"],
@@ -130,10 +148,16 @@ def make_attack_node(target: TargetModel):
                     "response": f"被平台内容过滤拦截（1301）：{e.response.text[:200]}",
                     "verdict": "defense_success",
                     "verdict_source": "platform_filter",
+                    "judge_reason": "平台内容过滤拦截（1301）",
+                    "judge_evidence": e.response.text[:200],
+                    "defense_signature": "platform_block",
                 }],
                 "verdicts": ["defense_success"],
                 "verdict_source": "platform_filter",
                 "needs_review": False,
+                "judge_reason": "平台内容过滤拦截（1301）",
+                "judge_evidence": e.response.text[:200],
+                "defense_signature": "platform_block",
                 "stop_reason": "platform_filter",
             }
 
@@ -144,31 +168,43 @@ def make_attack_node(target: TargetModel):
             {},
         )
         judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
-        verdict, verdict_source, needs_review = await judge_pair(
+        outcome = await judge_pair(
             action["payload"], response, judge_context, JUDGE_MODE
         )
 
         turn = {
             "task_id": state["task_id"],
+            "probe_run_id": state.get("probe_run_id"),
             "round_no": round_no,
             "agent_thought": action["thought"],
             "action": action["action"],
             "pattern_id": action["pattern_id"],
             "payload": action["payload"],
             "response": response,
-            "verdict": verdict,
-            "verdict_source": verdict_source,
+            "verdict": outcome.verdict,
+            "verdict_source": outcome.verdict_source,
+            "judge_reason": outcome.reason,
+            "judge_evidence": outcome.evidence,
+            "defense_signature": outcome.defense_signature,
+            "path_deviation": outcome.path_deviation,
         }
         # 终止判断只在节点里做一次并写进 state（should_stop 的唯一调用点），
         # 条件边纯读 stop_reason——避免边算一遍、wrapper 收尾再算一遍的逻辑漂移
-        verdicts_so_far = (state.get("verdicts") or []) + [verdict]
+        verdicts_so_far = (state.get("verdicts") or []) + [outcome.verdict]
         reason = should_stop(verdicts_so_far, round_no, MAX_ROUNDS)
+        pt, ct = usage_tokens(target.last_usage)
         update: dict[str, Any] = {
             "conversation": [user_msg, {"role": "assistant", "content": response}],
             "turns": [turn],
-            "verdicts": [verdict],
-            "verdict_source": verdict_source,
-            "needs_review": needs_review,
+            "verdicts": [outcome.verdict],
+            "verdict_source": outcome.verdict_source,
+            "needs_review": outcome.needs_review,
+            "judge_reason": outcome.reason,
+            "judge_evidence": outcome.evidence,
+            "defense_signature": outcome.defense_signature,
+            "path_deviation": outcome.path_deviation,
+            "prompt_tokens": (state.get("prompt_tokens") or 0) + pt,
+            "completion_tokens": (state.get("completion_tokens") or 0) + ct,
         }
         if reason:
             logger.info("探测终止: %s（第 %d 轮）", reason, round_no)
@@ -222,31 +258,59 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
     _update_task(db, task_id, {"status": "执行中"})
 
     try:
-        # 3. 跑图
+        # 3. Sprint 0：append-only 账本——新建 probe_run（带模型版本快照）
+        target_for_run = TargetModel()
+        run_id = create_probe_run(
+            db,
+            task_id,
+            entrypoint="probe",
+            probe_mode=PROBE_MODE,
+            target_model=target_for_run.model,
+            judge_model=resolve_judge_model(),
+            agent_model=resolve_agent_model(target_for_run.model),
+        )
+
+        # 4. 跑图
         candidate_patterns = fetch_candidate_patterns(db)
-        graph = build_probe_graph()
+        graph = build_probe_graph(target_for_run)
         final: ProbeState = await graph.ainvoke(
             {
                 "task_id": task_id,
                 "task": task,
+                "probe_run_id": run_id,
                 "candidate_patterns": candidate_patterns,
                 "round_no": 0,
                 "stop_reason": None,
             }
         )
 
-        # 4. 落库：批量写轮次 + 写回任务（终止原因读 state.stop_reason）
+        # 5. 落库（append-only）：只插不删，历史 run 的轮次完整保留
         turns = final.get("turns") or []
         verdicts = final.get("verdicts") or []
         agent_state = final.get("agent_state") or {}
         if turns:
-            # 重复探测：旧轮次整批替换（MVP 语义同 run_probe）
-            db.table(TURNS_TABLE).delete().eq("task_id", task_id).execute()
             db.table(TURNS_TABLE).insert(turns).execute()
 
         # 任务级最终判定：由终止原因推导（verdict 映射表见 final_verdict_for；
         # 会话级裁判 Phase 2）
         final_verdict = final_verdict_for(final.get("stop_reason"), verdicts)
+
+        finalize_probe_run(
+            db,
+            run_id,
+            rounds=len(turns),
+            final_verdict=final_verdict,
+            verdict_source=final.get("verdict_source"),
+            needs_review=final.get("needs_review") or False,
+            stop_reason=final.get("stop_reason"),
+            judge_reason=final.get("judge_reason"),
+            judge_evidence=final.get("judge_evidence"),
+            defense_signature=final.get("defense_signature"),
+            path_deviation=final.get("path_deviation"),
+            prompt_tokens=final.get("prompt_tokens") or 0,
+            completion_tokens=final.get("completion_tokens") or 0,
+        )
+
         update: dict[str, Any] = {
             "status": "完成",
             "actual_behavior": (
@@ -256,6 +320,11 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
             "verdict": final_verdict,
             "verdict_source": final.get("verdict_source"),
             "needs_review": final.get("needs_review") or False,
+            "judge_reason": final.get("judge_reason"),
+            "judge_evidence": final.get("judge_evidence"),
+            "defense_signature": final.get("defense_signature"),
+            "target_model": target_for_run.model,
+            "latest_probe_run_id": run_id,
             "stop_reason": final.get("stop_reason"),
             "agent_state": agent_state or None,
         }
@@ -269,9 +338,12 @@ async def run_probe_graph(task_id: str, db: Client) -> dict[str, Any]:
             "verdict": final_verdict,
             "verdict_source": final.get("verdict_source"),
             "needs_review": final.get("needs_review") or False,
+            "judge_reason": final.get("judge_reason"),
+            "judge_evidence": final.get("judge_evidence"),
             "is_success": final_verdict == "attack_success",
             "verdicts": verdicts,
             "stop_reason": final.get("stop_reason"),
+            "probe_run_id": run_id,
         }
     except Exception as e:
         # 图内部异常与手写循环异常对调用方无差别：任务记失败

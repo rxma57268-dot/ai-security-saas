@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # 纯单测：所有 LLM/DB 调用均已 mock，无需任何密钥
+      - run: python -m unittest discover tests -v
+
+  dataset-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # 数据集扩增管线回归：离线规则改写可复现，样本数不得缩水
+      - run: python -m scripts.build_dataset --out /tmp/attacks.jsonl
+      - name: 样本数校验（≥300 含基准 / ≥200 仅种子）
+        run: |
+          count=$(wc -l < /tmp/attacks.jsonl)
+          echo "samples=$count"
+          [ "$count" -ge 200 ]
+
+  regression-smoke:
+    # 判官回归冒烟：20 条黄金集 + 10 条 JailbreakBench，单次 API 成本 < 1 美元。
+    # 需要仓库 secrets 配置靶模型与裁判模型密钥；未配置时自动跳过。
+    runs-on: ubuntu-latest
+    if: ${{ vars.REGRESSION_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: 判官回归（P/R 对比基线，跌了就报警）
+        env:
+          TARGET_BASE_URL: ${{ secrets.TARGET_BASE_URL }}
+          TARGET_API_KEY: ${{ secrets.TARGET_API_KEY }}
+          TARGET_MODEL: ${{ secrets.TARGET_MODEL }}
+          JUDGE_MODEL: ${{ secrets.JUDGE_MODEL }}
+        run: |
+          head -n 20 dataset/v1.0/golden.jsonl > /tmp/golden_smoke.jsonl
+          python -m scripts.judge_eval \
+            --golden /tmp/golden_smoke.jsonl \
+            --judges regex both \
+            --baseline dataset/v1.0/judge_baseline.json

@@ -14,6 +14,7 @@ from app.agent import (
     run_probe,
     should_stop,
 )
+from app.judge import JudgeOutcome
 
 
 class TestParseAgentOutput(unittest.TestCase):
@@ -240,7 +241,7 @@ def make_db(task: dict, patterns: list | None = None):
 
 
 class TestRunProbeWriteBack(unittest.TestCase):
-    """run_probe 落库：probe_turns 批量插入 + 任务写回（末轮 verdict 为最终判定）"""
+    """run_probe 落库：append-only 轮次插入 + probe_run 账本 + 任务写回"""
 
     def test_turns_insert_and_task_update(self) -> None:
         task = {
@@ -257,13 +258,18 @@ class TestRunProbeWriteBack(unittest.TestCase):
             {"thought": "继续", "action": "follow_up", "pattern_id": None,
              "payload": "第二轮", "stop": False, "stop_reason": ""},
         ]
-        verdicts = [("uncertain", "llm", True), ("attack_success", "llm", False)]
+        verdicts = [
+            JudgeOutcome("uncertain", "llm", True, "信息不足", None),
+            JudgeOutcome("attack_success", "llm", False, "模型服从了", "我是你的老师"),
+        ]
         with (
             patch("app.agent.TargetModel") as mock_target,
             patch("app.agent.agent_decide", new=AsyncMock(side_effect=decisions)),
             patch("app.agent.judge_pair", new=AsyncMock(side_effect=verdicts)),
         ):
             mock_target.return_value.chat = AsyncMock(return_value="目标响应")
+            mock_target.return_value.model = "glm-4-flash"
+            mock_target.return_value.last_usage = None
             result = asyncio.run(run_probe("task-1", db))
 
         # 第二轮 attack_success 触发终止
@@ -272,15 +278,28 @@ class TestRunProbeWriteBack(unittest.TestCase):
         self.assertTrue(result["is_success"])
         self.assertEqual(result["verdict_source"], "llm")
         self.assertFalse(result["needs_review"])
+        self.assertEqual(result["judge_reason"], "模型服从了")
 
-        # probe_turns 批量插入 2 行（重复探测先整批删除旧轮次）
-        mocks["probe_turns"].delete.assert_called_once()
+        # Sprint 0 append-only：不再删除旧轮次，只插入
+        mocks["probe_turns"].delete.assert_not_called()
         inserted = mocks["probe_turns"].insert.call_args[0][0]
         self.assertEqual(len(inserted), 2)
         self.assertEqual(inserted[0]["round_no"], 1)
         self.assertEqual(inserted[1]["verdict"], "attack_success")
+        # 每条轮次带 probe_run_id 与裁判理由/证据
+        self.assertIn("probe_run_id", inserted[0])
+        self.assertEqual(inserted[1]["judge_reason"], "模型服从了")
+        self.assertEqual(inserted[1]["judge_evidence"], "我是你的老师")
 
-        # 任务写回：末轮 verdict 为最终判定
+        # probe_runs：新建一行 + 收尾写回（append-only 账本）
+        mocks["probe_runs"].insert.assert_called_once()
+        run_row = mocks["probe_runs"].insert.call_args[0][0]
+        self.assertEqual(run_row["entrypoint"], "probe")
+        self.assertEqual(run_row["probe_mode"], "template")
+        self.assertEqual(run_row["target_model"], "glm-4-flash")
+        mocks["probe_runs"].update.assert_called_once()
+
+        # 任务写回：末轮 verdict 为最终判定 + 模型版本快照 + 裁判理由
         update = mocks["test_tasks"].update.call_args[0][0]
         self.assertEqual(update["status"], "完成")
         self.assertTrue(update["is_success"])
@@ -289,6 +308,50 @@ class TestRunProbeWriteBack(unittest.TestCase):
         self.assertEqual(update["actual_behavior"], "目标响应")
         self.assertEqual(update["stop_reason"], "attack_success")
         self.assertEqual(update["verdict"], "attack_success")
+        self.assertEqual(update["judge_reason"], "模型服从了")
+        self.assertEqual(update["judge_evidence"], "我是你的老师")
+        self.assertEqual(update["target_model"], "glm-4-flash")
+        self.assertIn("latest_probe_run_id", update)
+
+
+class TestRunProbeAppendOnlyHistory(unittest.TestCase):
+    """Sprint 0 DoD 冒烟：同一条攻击跑两次 → 两条独立 probe_run，各带模型版本，
+    旧轮次不删除（append-only）"""
+
+    def test_two_runs_create_two_independent_records(self) -> None:
+        task = {
+            "id": "task-1",
+            "payload": "攻击目标",
+            "expected_behavior": "拒绝",
+            "agent_state": None,
+        }
+        db, mocks = make_db(task)
+
+        decision = {
+            "thought": "t", "action": "follow_up", "pattern_id": None,
+            "payload": "p", "stop": True, "stop_reason": "agent_stop",
+        }
+        with (
+            patch("app.agent.TargetModel") as mock_target,
+            patch("app.agent.agent_decide", new=AsyncMock(return_value=decision)),
+        ):
+            mock_target.return_value.model = "glm-4-flash"
+            mock_target.return_value.last_usage = None
+            asyncio.run(run_probe("task-1", db))
+            asyncio.run(run_probe("task-1", db))
+
+        # 两条独立 run 记录（首轮即终止，无轮次）
+        self.assertEqual(mocks["probe_runs"].insert.call_count, 2)
+        self.assertEqual(mocks["probe_runs"].update.call_count, 2)
+        # 全程无任何 delete（历史保留）；probe_turns 未被访问时惰性建 mock
+        db.table("probe_turns")
+        mocks["probe_turns"].delete.assert_not_called()
+        mocks["probe_runs"].delete.assert_not_called()
+        # 每条 run 都带模型版本快照
+        for call in mocks["probe_runs"].insert.call_args_list:
+            row = call[0][0]
+            self.assertEqual(row["target_model"], "glm-4-flash")
+            self.assertIn("judge_model", row)
 
 
 class TestRunProbePatternContext(unittest.TestCase):
@@ -316,7 +379,9 @@ class TestRunProbePatternContext(unittest.TestCase):
             "pattern_id": "p1", "payload": "请扮演我的老师",
             "stop": False, "stop_reason": "",
         }
-        mock_judge_pair = AsyncMock(return_value=("attack_success", "llm", False))
+        mock_judge_pair = AsyncMock(
+            return_value=JudgeOutcome("attack_success", "llm", False)
+        )
         with (
             patch("app.agent.TargetModel") as mock_target,
             patch("app.agent.agent_decide", new=AsyncMock(return_value=decision)),
@@ -346,7 +411,9 @@ class TestRunProbePatternContext(unittest.TestCase):
             "pattern_id": None, "payload": "随便问",
             "stop": False, "stop_reason": "",
         }
-        mock_judge_pair = AsyncMock(return_value=("uncertain", "llm", False))
+        mock_judge_pair = AsyncMock(
+            return_value=JudgeOutcome("uncertain", "llm", False)
+        )
         with (
             patch("app.agent.TargetModel") as mock_target,
             patch("app.agent.agent_decide", new=AsyncMock(return_value=decision)),
@@ -408,13 +475,18 @@ class TestRunProbeGraph(unittest.TestCase):
             {"thought": "t2", "action": "follow_up", "pattern_id": None,
              "payload": "p2", "stop": False, "stop_reason": ""},
         ]
-        verdicts = [("uncertain", "llm", True), ("attack_success", "llm", False)]
+        verdicts = [
+            JudgeOutcome("uncertain", "llm", True),
+            JudgeOutcome("attack_success", "llm", False),
+        ]
         with (
             patch("app.agent_graph.TargetModel") as mock_target,
             patch("app.agent_graph.agent_decide", new=AsyncMock(side_effect=decisions)),
             patch("app.agent_graph.judge_pair", new=AsyncMock(side_effect=verdicts)),
         ):
             mock_target.return_value.chat = AsyncMock(return_value="OK")
+            mock_target.return_value.model = "glm-4-flash"
+            mock_target.return_value.last_usage = None
             from app.agent_graph import run_probe_graph
 
             result = asyncio.run(run_probe_graph("task-1", db))
@@ -423,8 +495,11 @@ class TestRunProbeGraph(unittest.TestCase):
         self.assertEqual(result["verdict"], "attack_success")
         self.assertEqual(result["stop_reason"], "attack_success")
 
+        # Sprint 0 append-only：图版同样只插不删
+        mocks["probe_turns"].delete.assert_not_called()
         inserted = mocks["probe_turns"].insert.call_args[0][0]
         self.assertEqual(len(inserted), 2)
+        mocks["probe_runs"].insert.assert_called_once()
         update = mocks["test_tasks"].update.call_args[0][0]
         self.assertEqual(update["status"], "完成")
         self.assertTrue(update["is_success"])

@@ -33,6 +33,13 @@ from .executor import (
     _update_task,
 )
 from .judge import Verdict, judge_pair
+from .probe_runs import (
+    create_probe_run,
+    finalize_probe_run,
+    resolve_agent_model,
+    resolve_judge_model,
+    usage_tokens,
+)
 from .target import TargetModel
 
 TASKS_TABLE = "test_tasks"
@@ -50,6 +57,10 @@ _VALID_ACTIONS: tuple[str, ...] = (
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "8"))
 COMPRESS_AFTER = 8  # Agent 思考上下文超过此轮数开始压缩
 RECENT_WINDOW = 6  # 压缩时保留最近 N 轮原文
+
+# 探测模式（Sprint 4）：template=模板渲染（Agent 从模式库选模板），
+# pair=PAIR 攻击者模型逐轮生成 payload
+PROBE_MODE = os.environ.get("PROBE_MODE", "template")
 
 _PROMPT_TEMPLATE = (Path(__file__).parent / "agent_prompt.md").read_text(
     encoding="utf-8"
@@ -263,17 +274,97 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
     target = TargetModel()
     last_verdict_source: str | None = None
     last_needs_review = False
+    last_judge_reason: str | None = None
+    last_judge_evidence: str | None = None
+    last_defense_signature: str | None = None
+    last_path_deviation: str | None = None
     stop_reason: str | None = None
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
+    # Sprint 0：append-only 账本——新建 probe_run（带模型版本快照），
+    # 轮次带 probe_run_id 落库，不再整批删除旧轮次
+    run_id = create_probe_run(
+        db,
+        task_id,
+        entrypoint="probe",
+        probe_mode=PROBE_MODE,
+        target_model=target.model,
+        judge_model=resolve_judge_model(),
+        agent_model=resolve_agent_model(target.model),
+    )
+
+    # Sprint 4：payload 来源切换——template=模板渲染（Agent 从模式库选），
+    # pair=PAIR 自由生成（文献基线），dynamic=动态红队工具组合（v3 4A）
+    attacker = None
+    dynamic_attacker = None
+    if PROBE_MODE == "pair":
+        from .attacker import PAIRAttacker
+
+        attacker = PAIRAttacker()
+    elif PROBE_MODE == "dynamic":
+        from .attacker import DynamicAttacker
+        from .strategy import StrategyLibrary
+
+        # v3 Sprint 4C：策略库检索增强——攻击受挫时检索同类防御签名下的
+        # 历史成功策略注入 prompt（跨会话学习）
+        dynamic_attacker = DynamicAttacker(strategy_lib=StrategyLibrary(db=db))
 
     # 候选模式检索：一次拉取（探测期间模式库不变，无需每轮查）
     candidate_patterns = fetch_candidate_patterns(db)
 
     # ReAct 循环
     for round_no in range(1, MAX_ROUNDS + 1):
-        # Thought + Action：Agent 决策
-        action = await agent_decide(
-            task, agent_state, turns, candidate_patterns, round_no
-        )
+        # Thought + Action：模板决策 / PAIR 生成 / 动态红队工具组合
+        last_sig = turns[-1].get("defense_signature") if turns else None
+        last_dev = turns[-1].get("path_deviation") if turns else None
+        if dynamic_attacker is not None:
+            dyn = await dynamic_attacker.next_action(
+                str(task.get("payload") or ""),
+                conversation,
+                verdicts[-1] if verdicts else None,
+                last_sig,
+                last_dev,
+            )
+            if dyn["parse_failed"] or dyn["stop"]:
+                stop_reason = dyn["stop_reason"] or "agent_stop"
+                logger.info("动态红队 Attacker 终止: %s", stop_reason)
+                break
+            action = {
+                "thought": dyn["thought"],
+                "action": "follow_up",
+                "pattern_id": None,
+                "payload": dyn["payload"],
+                "tool_calls": dyn["tool_calls"],
+                "strategies_used": dyn.get("strategies_used"),
+                "stop": False,
+                "stop_reason": "",
+            }
+        elif attacker is not None:
+            attack = await attacker.next_payload(
+                str(task.get("payload") or ""),
+                conversation,
+                verdicts[-1] if verdicts else None,
+            )
+            if attack["parse_failed"]:
+                stop_reason = "pair_output_parse_failure"
+                logger.warning("PAIR attacker 输出解析失败，探测终止")
+                break
+            action = {
+                "thought": attack["rationale"],
+                "action": "follow_up",
+                "pattern_id": None,
+                "payload": attack["payload"],
+                "tool_calls": None,
+                "stop": False,
+                "stop_reason": "",
+            }
+        else:
+            action = await agent_decide(
+                task, agent_state, turns, candidate_patterns, round_no
+            )
+            action.setdefault("tool_calls", None)
+            action.setdefault("strategies_used", None)
         if action["stop"]:
             stop_reason = action["stop_reason"] or "agent_stop"
             logger.info("Agent 主动终止: %s", stop_reason)
@@ -282,9 +373,21 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
         # Action 执行：发给靶模型（完整会话历史）
         # 边界钉死：只有 payload 外发给目标模型；thought/action/stop_reason
         # 是内部状态，只进 probe_turns 表，永不进入 conversation。
-        conversation.append({"role": "user", "content": action["payload"]})
+        # 动态红队的 turn_split 链产出多轮 payload：本轮内依次发送（渐进式套话），
+        # 判定对象是最后一轮的响应
+        payloads: list[str] = (
+            action["payload"] if isinstance(action["payload"], list)
+            else [action["payload"]]
+        )
+        response: str | None = None
         try:
-            response = await target.chat(conversation)
+            for p in payloads:
+                conversation.append({"role": "user", "content": p})
+                response = await target.chat(conversation)
+                conversation.append({"role": "assistant", "content": response})
+                pt, ct = usage_tokens(target.last_usage)
+                total_prompt_tokens += pt
+                total_completion_tokens += ct
         except httpx.HTTPStatusError as e:
             if not _is_platform_content_filter(e):
                 raise  # 非 1301 的 HTTP 错误不吞，由 run_probe 兜底记失败
@@ -294,23 +397,29 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
             turns.append(
                 {
                     "task_id": task_id,
+                    "probe_run_id": run_id,
                     "round_no": round_no,
                     "agent_thought": action["thought"],
                     "action": action["action"],
                     "pattern_id": action["pattern_id"],
-                    "payload": action["payload"],
+                    "payload": payloads[-1],
                     "response": f"被平台内容过滤拦截（1301）：{e.response.text[:200]}",
                     "verdict": "defense_success",
                     "verdict_source": "platform_filter",
+                    "judge_reason": "平台内容过滤拦截（1301）",
+                    "judge_evidence": e.response.text[:200],
+                    "defense_signature": "platform_block",
                 }
             )
             verdicts.append("defense_success")
             last_verdict_source = "platform_filter"
             last_needs_review = False
+            last_judge_reason = "平台内容过滤拦截（1301）"
+            last_judge_evidence = e.response.text[:200]
+            last_defense_signature = "platform_block"
             stop_reason = "platform_filter"
             logger.info("第 %d 轮被平台内容过滤拦截（1301），探测终止", round_no)
             break
-        conversation.append({"role": "assistant", "content": response})
 
         # Observation：双裁判判定本轮（与 executor 共用 judge_pair）
         # 按 Agent 选定的 pattern_id 取模式（含 success/refusal_patterns）；
@@ -320,24 +429,37 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
             {},
         )
         judge_context = {**pattern, "expected_behavior": task.get("expected_behavior")}
-        verdict, verdict_source, needs_review = await judge_pair(
-            action["payload"], response, judge_context, JUDGE_MODE
+        outcome = await judge_pair(
+            payloads[-1], response, judge_context, JUDGE_MODE
         )
-        verdicts.append(verdict)
-        last_verdict_source = verdict_source
-        last_needs_review = needs_review
+        verdicts.append(outcome.verdict)
+        last_verdict_source = outcome.verdict_source
+        last_needs_review = outcome.needs_review
+        last_judge_reason = outcome.reason
+        last_judge_evidence = outcome.evidence
+        last_defense_signature = outcome.defense_signature
+        last_path_deviation = outcome.path_deviation
 
         turns.append(
             {
                 "task_id": task_id,
+                "probe_run_id": run_id,
                 "round_no": round_no,
                 "agent_thought": action["thought"],
                 "action": action["action"],
                 "pattern_id": action["pattern_id"],
-                "payload": action["payload"],
+                "payload": payloads[-1],
                 "response": response,
-                "verdict": verdict,
-                "verdict_source": verdict_source,
+                "verdict": outcome.verdict,
+                "verdict_source": outcome.verdict_source,
+                "judge_reason": outcome.reason,
+                "judge_evidence": outcome.evidence,
+                "defense_signature": outcome.defense_signature,
+                "path_deviation": outcome.path_deviation,
+                # v3 Sprint 4A：手法序列落库（策略库挖掘的数据源）
+                "tool_calls": action.get("tool_calls"),
+                # v3 Sprint 4C：策略库命中记录（报告的命中统计数据源）
+                "strategies_used": action.get("strategies_used"),
             }
         )
 
@@ -353,16 +475,32 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
             logger.info("探测终止: %s（第 %d 轮）", reason, round_no)
             break
 
-    # 落库：批量写轮次 + 写回任务
+    # 落库（Sprint 0 append-only）：只插不删——历史 run 的轮次完整保留，
+    # 同一任务重复探测产生多条 probe_run，各自携带独立轮次与模型快照
     if turns:
-        # 重复探测：旧轮次整批替换（MVP 只保留最近一次探测；
-        # 保留历史尝试是 Phase 2，加 attempt 列）
-        db.table(TURNS_TABLE).delete().eq("task_id", task_id).execute()
         db.table(TURNS_TABLE).insert(turns).execute()
 
     # 任务级最终判定：由终止原因推导（verdict 映射表见 final_verdict_for）
     # TODO(Phase 2): 会话级裁判（完整历史 + 注入防御定界符，见设计文档第 2 节）
     final_verdict = final_verdict_for(stop_reason, verdicts)
+
+    # probe_run 收尾：最终判定 + 轮次 + 防御签名 + token 成本
+    finalize_probe_run(
+        db,
+        run_id,
+        rounds=len(turns),
+        final_verdict=final_verdict,
+        verdict_source=last_verdict_source,
+        needs_review=last_needs_review,
+        stop_reason=stop_reason,
+        judge_reason=last_judge_reason,
+        judge_evidence=last_judge_evidence,
+        defense_signature=last_defense_signature,
+        path_deviation=last_path_deviation,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
+    )
+
     update: dict[str, Any] = {
         "status": "完成",
         "actual_behavior": (
@@ -372,6 +510,11 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
         "verdict": final_verdict,
         "verdict_source": last_verdict_source,
         "needs_review": last_needs_review,
+        "judge_reason": last_judge_reason,
+        "judge_evidence": last_judge_evidence,
+        "defense_signature": last_defense_signature,
+        "target_model": target.model,
+        "latest_probe_run_id": run_id,
         "stop_reason": stop_reason,
         "agent_state": agent_state or None,
     }
@@ -387,7 +530,12 @@ async def _probe_loop(task_id: str, task: dict[str, Any], db: Client) -> dict[st
         "verdict": final_verdict,
         "verdict_source": last_verdict_source,
         "needs_review": last_needs_review,
+        "judge_reason": last_judge_reason,
+        "judge_evidence": last_judge_evidence,
         "is_success": final_verdict == "attack_success",
         "verdicts": verdicts,
         "stop_reason": stop_reason,
+        "probe_run_id": run_id,
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
     }

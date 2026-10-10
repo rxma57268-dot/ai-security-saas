@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # compose 内可用 SUPABASE_URL 等覆盖 .env；数据库为 Supabase
+      # （云端项目或本地 supabase CLI 起的栈，见 README 快速开始）
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+
+  # 说明：平台强依赖 Supabase（GoTrue 认证 + PostgREST RLS），
+  # 完整本地栈请用 Supabase CLI：
+  #   supabase start   # 起本地 Postgres + GoTrue + PostgREST
+  #   然后把 .env 的 SUPABASE_URL/SUPABASE_KEY 指向本地栈（http://localhost:54321）
+  # 轻量替代：直接用 Supabase 云端免费项目（推荐，免运维）。
